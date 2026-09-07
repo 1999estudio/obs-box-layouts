@@ -29,20 +29,20 @@ VertData VSDefault(VertData vert_in)
 float roundedDistance(float2 point, float2 halfSize, float cornerRadius)
 {
 	float2 q = abs(point) - halfSize + cornerRadius;
-	return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - cornerRadius;
+	return length(max(q, float2(0.0, 0.0))) + min(max(q.x, q.y), 0.0) - cornerRadius;
 }
 
 float4 PSRoundedBox(VertData vert_in) : TARGET
 {
 	float2 sourceUV = uvOffset + vert_in.uv * uvScale;
-	float4 source = image.Sample(linearSampler, sourceUV);
+	float4 sampledColor = image.Sample(linearSampler, sourceUV);
 	float2 point = (vert_in.uv - 0.5) * boxSize;
-	float distance = roundedDistance(point, boxSize * 0.5, radius);
-	float outerMask = 1.0 - smoothstep(-0.75, 0.75, distance);
-	float innerMask = 1.0 - smoothstep(-0.75, 0.75, distance + borderWidth);
+	float signedDistance = roundedDistance(point, boxSize * 0.5, radius);
+	float outerMask = 1.0 - smoothstep(-0.75, 0.75, signedDistance);
+	float innerMask = 1.0 - smoothstep(-0.75, 0.75, signedDistance + borderWidth);
 	float borderMask = max(outerMask - innerMask, 0.0);
 	float4 premultipliedBorder = float4(borderColor.rgb * borderColor.a, borderColor.a);
-	return source * innerMask + premultipliedBorder * borderMask;
+	return sampledColor * innerMask + premultipliedBorder * borderMask;
 }
 
 technique Draw

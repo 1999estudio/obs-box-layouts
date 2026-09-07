@@ -9,6 +9,7 @@
 #include <pthread.h>
 #include <util/bmem.h>
 #include <util/platform.h>
+#include <util/threading.h>
 
 #include <math.h>
 #include <stdio.h>
@@ -85,6 +86,8 @@ struct box_layout {
 	gs_eparam_t *radius_param;
 	gs_eparam_t *border_width_param;
 	gs_eparam_t *border_color_param;
+	bool effect_ready;
+	bool graphics_warning_logged;
 	bool dragging;
 	bool drag_content;
 	bool drag_converted;
@@ -96,6 +99,16 @@ struct box_layout {
 	struct box_rect drag_start_rect;
 	float drag_start_pan_x;
 	float drag_start_pan_y;
+};
+
+struct box_render_state {
+	obs_source_t *source;
+	float zoom;
+	float pan_x;
+	float pan_y;
+	float radius;
+	float border_width;
+	uint32_t border_color;
 };
 
 static int preset_box_count(int preset)
@@ -394,7 +407,11 @@ static void *box_layout_create(obs_data_t *settings, obs_source_t *source)
 {
 	struct box_layout *layout = bzalloc(sizeof(*layout));
 	layout->context = source;
-	pthread_mutex_init(&layout->mutex, NULL);
+	if (pthread_mutex_init_recursive(&layout->mutex) != 0) {
+		blog(LOG_ERROR, "[obs-box-layouts] could not initialize source mutex");
+		bfree(layout);
+		return NULL;
+	}
 
 	char *effect_path = obs_module_file("box-layout.effect");
 	char *error = NULL;
@@ -403,31 +420,30 @@ static void *box_layout_create(obs_data_t *settings, obs_source_t *source)
 	obs_enter_graphics();
 	layout->texrender = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
 	layout->blank_texture = gs_texture_create(1, 1, GS_RGBA, 1, pixel_data, 0);
-	layout->effect = gs_effect_create_from_file(effect_path, &error);
+	if (effect_path)
+		layout->effect = gs_effect_create_from_file(effect_path, &error);
 	obs_leave_graphics();
 	bfree(effect_path);
 
-	if (!layout->texrender || !layout->blank_texture || !layout->effect) {
-		blog(LOG_ERROR, "[obs-box-layouts] could not initialize graphics: %s", error ? error : "unknown error");
-		bfree(error);
-		obs_enter_graphics();
-		gs_texrender_destroy(layout->texrender);
-		gs_texture_destroy(layout->blank_texture);
-		gs_effect_destroy(layout->effect);
-		obs_leave_graphics();
-		pthread_mutex_destroy(&layout->mutex);
-		bfree(layout);
-		return NULL;
+	if (layout->effect) {
+		layout->image_param = gs_effect_get_param_by_name(layout->effect, "image");
+		layout->box_size_param = gs_effect_get_param_by_name(layout->effect, "boxSize");
+		layout->uv_scale_param = gs_effect_get_param_by_name(layout->effect, "uvScale");
+		layout->uv_offset_param = gs_effect_get_param_by_name(layout->effect, "uvOffset");
+		layout->radius_param = gs_effect_get_param_by_name(layout->effect, "radius");
+		layout->border_width_param = gs_effect_get_param_by_name(layout->effect, "borderWidth");
+		layout->border_color_param = gs_effect_get_param_by_name(layout->effect, "borderColor");
+		layout->effect_ready = layout->image_param && layout->box_size_param && layout->uv_scale_param &&
+				       layout->uv_offset_param && layout->radius_param && layout->border_width_param &&
+				       layout->border_color_param;
+	}
+
+	if (!layout->texrender || !layout->blank_texture || !layout->effect_ready) {
+		blog(LOG_WARNING,
+		     "[obs-box-layouts] custom graphics unavailable; using safe rectangular fallback: %s",
+		     error ? error : "required graphics resource or effect parameter is missing");
 	}
 	bfree(error);
-
-	layout->image_param = gs_effect_get_param_by_name(layout->effect, "image");
-	layout->box_size_param = gs_effect_get_param_by_name(layout->effect, "boxSize");
-	layout->uv_scale_param = gs_effect_get_param_by_name(layout->effect, "uvScale");
-	layout->uv_offset_param = gs_effect_get_param_by_name(layout->effect, "uvOffset");
-	layout->radius_param = gs_effect_get_param_by_name(layout->effect, "radius");
-	layout->border_width_param = gs_effect_get_param_by_name(layout->effect, "borderWidth");
-	layout->border_color_param = gs_effect_get_param_by_name(layout->effect, "borderColor");
 
 	box_layout_update(layout, settings);
 	return layout;
@@ -460,7 +476,7 @@ static void box_layout_destroy(void *data)
 
 static gs_texture_t *render_child(struct box_layout *layout, obs_source_t *source)
 {
-	if (!source)
+	if (!source || !layout->texrender)
 		return NULL;
 
 	const uint32_t width = obs_source_get_width(source);
@@ -468,6 +484,10 @@ static gs_texture_t *render_child(struct box_layout *layout, obs_source_t *sourc
 	if (!width || !height)
 		return NULL;
 
+	/* Direct3D keeps the previous shader-resource binding cached after a
+	 * texrender texture becomes a render target. Explicitly unbind it before
+	 * beginning the next child render so the texture is rebound for drawing. */
+	gs_load_texture(NULL, 0);
 	gs_texrender_reset(layout->texrender);
 	gs_blend_state_push();
 	gs_blend_function(GS_BLEND_ONE, GS_BLEND_ZERO);
@@ -507,6 +527,37 @@ static void draw_masked_texture(struct box_layout *layout, gs_texture_t *texture
 				uint32_t source_height, const struct box_rect *rect, float zoom, float pan_x,
 				float pan_y, float radius, float border_width, uint32_t border_color)
 {
+	if (!layout->effect_ready) {
+		if (!layout->graphics_warning_logged) {
+			blog(LOG_WARNING, "[obs-box-layouts] rendering boxes without rounded corners or borders");
+			layout->graphics_warning_logged = true;
+		}
+		if (!texture)
+			return;
+
+		gs_effect_t *effect = obs_get_base_effect(OBS_EFFECT_DEFAULT);
+		gs_eparam_t *image = gs_effect_get_param_by_name(effect, "image");
+		gs_effect_set_texture(image, texture);
+		struct vec2 uv_scale;
+		struct vec2 uv_offset;
+		calculate_cover_uv(source_width, source_height, rect->width, rect->height, zoom, pan_x, pan_y,
+				   &uv_scale, &uv_offset);
+		const uint32_t crop_x = (uint32_t)fmaxf(0.0f, floorf(uv_offset.x * source_width));
+		const uint32_t crop_y = (uint32_t)fmaxf(0.0f, floorf(uv_offset.y * source_height));
+		const uint32_t crop_width =
+			(uint32_t)fmaxf(1.0f, floorf(uv_scale.x * source_width));
+		const uint32_t crop_height =
+			(uint32_t)fmaxf(1.0f, floorf(uv_scale.y * source_height));
+		gs_matrix_push();
+		gs_matrix_translate3f(rect->x, rect->y, 0.0f);
+		gs_matrix_scale3f(rect->width / crop_width, rect->height / crop_height, 1.0f);
+		while (gs_effect_loop(effect, "Draw"))
+			gs_draw_sprite_subregion(texture, 0, crop_x, crop_y, crop_width, crop_height);
+		gs_matrix_pop();
+		gs_load_texture(NULL, 0);
+		return;
+	}
+
 	struct vec2 box_size;
 	struct vec2 uv_scale;
 	struct vec2 uv_offset;
@@ -534,17 +585,18 @@ static void draw_masked_texture(struct box_layout *layout, gs_texture_t *texture
 	while (gs_effect_loop(layout->effect, "Draw"))
 		gs_draw_sprite(NULL, 0, (uint32_t)rect->width, (uint32_t)rect->height);
 	gs_matrix_pop();
+	gs_load_texture(NULL, 0);
 }
 
-static void draw_background_color(const struct box_layout *layout)
+static void draw_background_color(uint32_t width, uint32_t height, uint32_t background_color)
 {
 	struct vec4 color;
-	vec4_from_rgba(&color, layout->background_color);
+	vec4_from_rgba(&color, background_color);
 	gs_effect_t *effect = obs_get_base_effect(OBS_EFFECT_SOLID);
 	gs_eparam_t *color_param = gs_effect_get_param_by_name(effect, "color");
 	gs_effect_set_vec4(color_param, &color);
 	while (gs_effect_loop(effect, "Solid"))
-		gs_draw_sprite(NULL, 0, layout->width, layout->height);
+		gs_draw_sprite(NULL, 0, width, height);
 }
 
 static void calculate_render_order(const struct box_layout *layout, int count, int order[MAX_BOXES])
@@ -570,43 +622,73 @@ static void box_layout_render(void *data, gs_effect_t *unused)
 	struct box_layout *layout = data;
 	struct box_rect rects[MAX_BOXES] = {0};
 	int order[MAX_BOXES] = {0};
+	struct box_render_state boxes[MAX_BOXES] = {0};
+	obs_source_t *background = NULL;
+	uint32_t width;
+	uint32_t height;
+	uint32_t background_color;
+	int count;
 	UNUSED_PARAMETER(unused);
+	if (!layout)
+		return;
 
 	pthread_mutex_lock(&layout->mutex);
-	draw_background_color(layout);
+	width = layout->width;
+	height = layout->height;
+	background_color = layout->background_color;
+	if (layout->background)
+		background = obs_source_get_ref(layout->background);
+	count = calculate_rects(layout, rects);
+	calculate_render_order(layout, count, order);
+	for (int i = 0; i < count; i++) {
+		struct layout_box *box = &layout->boxes[i];
+		if (box->source)
+			boxes[i].source = obs_source_get_ref(box->source);
+		boxes[i].zoom = box->zoom;
+		boxes[i].pan_x = box->pan_x;
+		boxes[i].pan_y = box->pan_y;
+		boxes[i].radius = box->radius;
+		boxes[i].border_width = box->border_width;
+		boxes[i].border_color = box->border_color;
+	}
+	pthread_mutex_unlock(&layout->mutex);
 
-	if (layout->background) {
-		gs_texture_t *texture = render_child(layout, layout->background);
+	draw_background_color(width, height, background_color);
+
+	if (background) {
+		gs_texture_t *texture = render_child(layout, background);
 		if (texture) {
-			struct box_rect canvas = {0.0f, 0.0f, (float)layout->width, (float)layout->height};
-			draw_masked_texture(layout, texture, obs_source_get_width(layout->background),
-					    obs_source_get_height(layout->background), &canvas, 1.0f, 0.0f, 0.0f, 0.0f,
+			struct box_rect canvas = {0.0f, 0.0f, (float)width, (float)height};
+			draw_masked_texture(layout, texture, obs_source_get_width(background),
+					    obs_source_get_height(background), &canvas, 1.0f, 0.0f, 0.0f, 0.0f,
 					    0.0f, 0);
 		}
+		obs_source_release(background);
 	}
 
-	const int count = calculate_rects(layout, rects);
-	calculate_render_order(layout, count, order);
 	for (int position = 0; position < count; position++) {
 		const int i = order[position];
-		struct layout_box *box = &layout->boxes[i];
+		struct box_render_state *box = &boxes[i];
 		gs_texture_t *texture = render_child(layout, box->source);
 		const uint32_t source_width = box->source ? obs_source_get_width(box->source) : 0;
 		const uint32_t source_height = box->source ? obs_source_get_height(box->source) : 0;
 		draw_masked_texture(layout, texture, source_width, source_height, &rects[i], box->zoom, box->pan_x,
 				    box->pan_y, box->radius, box->border_width, box->border_color);
+		if (box->source)
+			obs_source_release(box->source);
 	}
-	pthread_mutex_unlock(&layout->mutex);
 }
 
 static uint32_t box_layout_width(void *data)
 {
-	return ((struct box_layout *)data)->width;
+	const struct box_layout *layout = data;
+	return layout ? layout->width : 0;
 }
 
 static uint32_t box_layout_height(void *data)
 {
-	return ((struct box_layout *)data)->height;
+	const struct box_layout *layout = data;
+	return layout ? layout->height : 0;
 }
 
 static void persist_box_transform(struct box_layout *layout, int index, bool geometry, bool content)
@@ -727,7 +809,7 @@ static void box_layout_mouse_click(void *data, const struct obs_mouse_event *eve
 				   uint32_t click_count)
 {
 	struct box_layout *layout = data;
-	if (type != MOUSE_LEFT)
+	if (!layout || !event || type != MOUSE_LEFT)
 		return;
 
 	if (mouse_up) {
@@ -800,7 +882,7 @@ static void box_layout_mouse_click(void *data, const struct obs_mouse_event *eve
 static void box_layout_mouse_move(void *data, const struct obs_mouse_event *event, bool mouse_leave)
 {
 	struct box_layout *layout = data;
-	if (mouse_leave)
+	if (!layout || !event || mouse_leave)
 		return;
 
 	pthread_mutex_lock(&layout->mutex);
@@ -885,7 +967,7 @@ static void box_layout_mouse_wheel(void *data, const struct obs_mouse_event *eve
 {
 	struct box_layout *layout = data;
 	UNUSED_PARAMETER(x_delta);
-	if (!y_delta)
+	if (!layout || !event || !y_delta)
 		return;
 
 	pthread_mutex_lock(&layout->mutex);
@@ -916,30 +998,45 @@ static bool child_already_added(obs_source_t *children[MAX_CHILDREN], size_t cou
 	return false;
 }
 
-static size_t collect_children(struct box_layout *layout, obs_source_t *children[MAX_CHILDREN])
+static size_t collect_child_refs(struct box_layout *layout, obs_source_t *children[MAX_CHILDREN])
 {
 	size_t count = 0;
-	if (layout->background)
-		children[count++] = layout->background;
+	pthread_mutex_lock(&layout->mutex);
+	if (layout->background) {
+		obs_source_t *source = obs_source_get_ref(layout->background);
+		if (source)
+			children[count++] = source;
+	}
 
 	const int box_count = layout_box_count(layout);
 	for (int i = 0; i < box_count; i++) {
 		obs_source_t *source = layout->boxes[i].source;
-		if (source && !child_already_added(children, count, source))
-			children[count++] = source;
+		if (source && !child_already_added(children, count, source)) {
+			source = obs_source_get_ref(source);
+			if (source)
+				children[count++] = source;
+		}
 	}
+	pthread_mutex_unlock(&layout->mutex);
 	return count;
+}
+
+static void release_child_refs(obs_source_t *children[MAX_CHILDREN], size_t count)
+{
+	for (size_t i = 0; i < count; i++)
+		obs_source_release(children[i]);
 }
 
 static void box_layout_enum_sources(void *data, obs_source_enum_proc_t callback, void *param)
 {
 	struct box_layout *layout = data;
 	obs_source_t *children[MAX_CHILDREN];
-	pthread_mutex_lock(&layout->mutex);
-	const size_t count = collect_children(layout, children);
+	if (!layout || !callback)
+		return;
+	const size_t count = collect_child_refs(layout, children);
 	for (size_t i = 0; i < count; i++)
 		callback(layout->context, children[i], param);
-	pthread_mutex_unlock(&layout->mutex);
+	release_child_refs(children, count);
 }
 
 static bool box_layout_audio_render(void *data, uint64_t *ts_out, struct obs_source_audio_mix *audio_output,
@@ -948,9 +1045,10 @@ static bool box_layout_audio_render(void *data, uint64_t *ts_out, struct obs_sou
 	struct box_layout *layout = data;
 	obs_source_t *children[MAX_CHILDREN];
 	uint64_t min_ts = 0;
+	if (!layout)
+		return false;
 
-	pthread_mutex_lock(&layout->mutex);
-	const size_t count = collect_children(layout, children);
+	const size_t count = collect_child_refs(layout, children);
 	for (size_t i = 0; i < count; i++) {
 		obs_source_t *child = children[i];
 		if (!(obs_source_get_output_flags(child) & OBS_SOURCE_AUDIO) || obs_source_audio_pending(child))
@@ -961,7 +1059,7 @@ static bool box_layout_audio_render(void *data, uint64_t *ts_out, struct obs_sou
 	}
 
 	if (!min_ts) {
-		pthread_mutex_unlock(&layout->mutex);
+		release_child_refs(children, count);
 		return false;
 	}
 
@@ -991,7 +1089,7 @@ static bool box_layout_audio_render(void *data, uint64_t *ts_out, struct obs_sou
 			}
 		}
 	}
-	pthread_mutex_unlock(&layout->mutex);
+	release_child_refs(children, count);
 	*ts_out = min_ts;
 	return true;
 }
