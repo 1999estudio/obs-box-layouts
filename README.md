@@ -78,7 +78,7 @@ cmake --build --preset ubuntu-x86_64
 ```
 
 Los workflows incluidos en `.github/workflows` pueden generar artefactos para los tres sistemas desde GitHub Actions.
-También generan un ZIP portable y un instalador `.exe` por usuario para Windows. Consulta
+También generan un ZIP portable y un instalador `.exe` para todos los usuarios de Windows. Consulta
 [`DISTRIBUTION.md`](DISTRIBUTION.md) para publicar versiones y trasladar colecciones de escenas.
 
 ## Estructura

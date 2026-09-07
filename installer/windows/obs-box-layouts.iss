@@ -15,11 +15,12 @@ AppId={{16B13EEB-55C1-471C-B328-6FE61AC83020}
 AppName=OBS Box Layouts
 AppVersion={#MyAppVersion}
 AppPublisher=OBS Box Layouts contributors
-AppPublisherURL=https://obsproject.com/
-DefaultDirName={userappdata}\obs-studio\plugins\obs-box-layouts
+AppPublisherURL=https://github.com/1999estudio/obs-box-layouts
+DefaultDirName={commonappdata}\obs-studio\plugins\obs-box-layouts
 DisableDirPage=yes
 DisableProgramGroupPage=yes
-PrivilegesRequired=lowest
+PrivilegesRequired=admin
+UsePreviousAppDir=no
 ArchitecturesAllowed=x64
 ArchitecturesInstallIn64BitMode=x64
 OutputDir={#OutputDir}
@@ -37,3 +38,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Files]
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+
+[InstallDelete]
+; Remove the incorrect per-user location used by version 0.7.0.
+Type: filesandordirs; Name: "{userappdata}\obs-studio\plugins\obs-box-layouts"

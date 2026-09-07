@@ -8,7 +8,7 @@ generados.
 Al ejecutar el workflow **Dispatch** de GitHub Actions se generan:
 
 - `obs-box-layouts-VERSION-windows-x64.zip`: paquete portable para Windows de 64 bits.
-- `obs-box-layouts-VERSION-windows-x64-installer.exe`: instalador por usuario para Windows.
+- `obs-box-layouts-VERSION-windows-x64-installer.exe`: instalador para todos los usuarios de Windows.
 - `obs-box-layouts-VERSION-macos-universal.tar.xz`: plugin para Mac Intel y Apple Silicon.
 - `obs-box-layouts-VERSION-macos-universal.pkg`: instalador de macOS cuando el empaquetado lo produce.
 - Paquetes y archivo portable para Ubuntu x86_64.
@@ -26,10 +26,10 @@ el mismo número, por ejemplo `0.7.0`. El workflow deja un borrador de GitHub Re
 
 ## Windows
 
-El instalador coloca el plugin sin permisos de administrador en:
+El instalador solicita permisos de administrador y coloca el plugin en la ruta recomendada por OBS:
 
 ```text
-%APPDATA%\obs-studio\plugins\obs-box-layouts
+C:\ProgramData\obs-studio\plugins\obs-box-layouts
 ```
 
 El ZIP contiene la misma carpeta portable:
@@ -43,7 +43,10 @@ obs-box-layouts/
 ```
 
 Para instalar el ZIP manualmente, copia la carpeta `obs-box-layouts` completa dentro de
-`%APPDATA%\obs-studio\plugins\` y reinicia OBS.
+`C:\ProgramData\obs-studio\plugins\` y reinicia OBS.
+
+La versión 0.7.1 también elimina la copia incorrecta que el instalador 0.7.0 podía dejar en
+`%APPDATA%\obs-studio\plugins\obs-box-layouts`.
 
 El instalador se crea con Inno Setup 6. En GitHub Actions la dependencia se instala automáticamente. Para compilarlo
 localmente necesitas Windows x64, Visual Studio 2022, CMake, PowerShell 7 e Inno Setup 6.
