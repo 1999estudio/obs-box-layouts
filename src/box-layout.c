@@ -157,8 +157,7 @@ static int calculate_rects(const struct box_layout *layout, struct box_rect rect
 			const struct layout_box *box = &layout->boxes[i];
 			const float x = fmaxf(0.0f, fminf(box->custom_x, w - 1.0f));
 			const float y = fmaxf(0.0f, fminf(box->custom_y, h - 1.0f));
-			set_rect(&rects[i], x, y, fminf(box->custom_width, w - x),
-				 fminf(box->custom_height, h - y));
+			set_rect(&rects[i], x, y, fminf(box->custom_width, w - x), fminf(box->custom_height, h - y));
 		}
 		return count;
 	}
@@ -208,8 +207,8 @@ static int calculate_rects(const struct box_layout *layout, struct box_rect rect
 	default:
 		for (int row = 0; row < 2; row++)
 			for (int col = 0; col < 3; col++)
-				set_rect(&rects[row * 3 + col], col * (third_w + g), row * (half_h + g),
-					 third_w, half_h);
+				set_rect(&rects[row * 3 + col], col * (third_w + g), row * (half_h + g), third_w,
+					 half_h);
 		break;
 	}
 
@@ -252,7 +251,8 @@ static void replace_child(struct box_layout *layout, obs_source_t **slot, bool *
 		return;
 
 	obs_source_t *candidate = obs_get_source_by_name(name);
-	if (!candidate || candidate == layout->context || !(obs_source_get_output_flags(candidate) & OBS_SOURCE_VIDEO)) {
+	if (!candidate || candidate == layout->context ||
+	    !(obs_source_get_output_flags(candidate) & OBS_SOURCE_VIDEO)) {
 		if (candidate)
 			obs_source_release(candidate);
 		return;
@@ -302,8 +302,8 @@ static void box_layout_update(void *data, obs_data_t *settings)
 		box_key(key, sizeof(key), i, "source");
 		const char *source_name = obs_data_get_string(settings, key);
 		replace_name(&layout->boxes[i].source_name, source_name);
-		replace_child(layout, &layout->boxes[i].source, &layout->boxes[i].active,
-			      source_name, i < active_box_count);
+		replace_child(layout, &layout->boxes[i].source, &layout->boxes[i].active, source_name,
+			      i < active_box_count);
 		box_key(key, sizeof(key), i, "zoom");
 		layout->boxes[i].zoom = (float)obs_data_get_double(settings, key);
 		box_key(key, sizeof(key), i, "pan_x");
@@ -337,12 +337,13 @@ static void box_layout_save(void *data, obs_data_t *settings)
 	struct box_layout *layout = data;
 	char key[64];
 	pthread_mutex_lock(&layout->mutex);
-	const char *background_name = layout->background ? obs_source_get_name(layout->background) : layout->background_name;
+	const char *background_name = layout->background ? obs_source_get_name(layout->background)
+							 : layout->background_name;
 	obs_data_set_string(settings, "background_source", background_name ? background_name : "");
 	for (int i = 0; i < MAX_BOXES; i++) {
 		box_key(key, sizeof(key), i, "source");
 		const char *source_name = layout->boxes[i].source ? obs_source_get_name(layout->boxes[i].source)
-							      : layout->boxes[i].source_name;
+								  : layout->boxes[i].source_name;
 		obs_data_set_string(settings, key, source_name ? source_name : "");
 	}
 	pthread_mutex_unlock(&layout->mutex);
@@ -439,8 +440,7 @@ static void *box_layout_create(obs_data_t *settings, obs_source_t *source)
 	}
 
 	if (!layout->texrender || !layout->blank_texture || !layout->effect_ready) {
-		blog(LOG_WARNING,
-		     "[obs-box-layouts] custom graphics unavailable; using safe rectangular fallback: %s",
+		blog(LOG_WARNING, "[obs-box-layouts] custom graphics unavailable; using safe rectangular fallback: %s",
 		     error ? error : "required graphics resource or effect parameter is missing");
 	}
 	bfree(error);
@@ -458,8 +458,7 @@ static void box_layout_destroy(void *data)
 	pthread_mutex_lock(&layout->mutex);
 	remove_child(layout, &layout->background, &layout->background_active);
 	bfree(layout->background_name);
-	for (int i = 0; i < MAX_BOXES; i++)
-	{
+	for (int i = 0; i < MAX_BOXES; i++) {
 		remove_child(layout, &layout->boxes[i].source, &layout->boxes[i].active);
 		bfree(layout->boxes[i].source_name);
 	}
@@ -544,10 +543,8 @@ static void draw_masked_texture(struct box_layout *layout, gs_texture_t *texture
 				   &uv_scale, &uv_offset);
 		const uint32_t crop_x = (uint32_t)fmaxf(0.0f, floorf(uv_offset.x * source_width));
 		const uint32_t crop_y = (uint32_t)fmaxf(0.0f, floorf(uv_offset.y * source_height));
-		const uint32_t crop_width =
-			(uint32_t)fmaxf(1.0f, floorf(uv_scale.x * source_width));
-		const uint32_t crop_height =
-			(uint32_t)fmaxf(1.0f, floorf(uv_scale.y * source_height));
+		const uint32_t crop_width = (uint32_t)fmaxf(1.0f, floorf(uv_scale.x * source_width));
+		const uint32_t crop_height = (uint32_t)fmaxf(1.0f, floorf(uv_scale.y * source_height));
 		gs_matrix_push();
 		gs_matrix_translate3f(rect->x, rect->y, 0.0f);
 		gs_matrix_scale3f(rect->width / crop_width, rect->height / crop_height, 1.0f);
@@ -568,8 +565,8 @@ static void draw_masked_texture(struct box_layout *layout, gs_texture_t *texture
 	vec4_from_rgba(&border, border_color);
 
 	if (source_width && source_height)
-		calculate_cover_uv(source_width, source_height, rect->width, rect->height, zoom, pan_x, pan_y, &uv_scale,
-				   &uv_offset);
+		calculate_cover_uv(source_width, source_height, rect->width, rect->height, zoom, pan_x, pan_y,
+				   &uv_scale, &uv_offset);
 
 	const float max_radius = fminf(rect->width, rect->height) * 0.5f;
 	gs_effect_set_texture(layout->image_param, texture ? texture : layout->blank_texture);
@@ -660,8 +657,8 @@ static void box_layout_render(void *data, gs_effect_t *unused)
 		if (texture) {
 			struct box_rect canvas = {0.0f, 0.0f, (float)width, (float)height};
 			draw_masked_texture(layout, texture, obs_source_get_width(background),
-					    obs_source_get_height(background), &canvas, 1.0f, 0.0f, 0.0f, 0.0f,
-					    0.0f, 0);
+					    obs_source_get_height(background), &canvas, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+					    0);
 		}
 		obs_source_release(background);
 	}
@@ -773,8 +770,7 @@ static void convert_current_preset_to_custom(struct box_layout *layout)
 	layout->preset = PRESET_CUSTOM;
 }
 
-static int hit_test_box(struct box_layout *layout, int32_t x, int32_t y, uint32_t *edges,
-			struct box_rect *hit_rect)
+static int hit_test_box(struct box_layout *layout, int32_t x, int32_t y, uint32_t *edges, struct box_rect *hit_rect)
 {
 	struct box_rect rects[MAX_BOXES] = {0};
 	int order[MAX_BOXES] = {0};
@@ -836,8 +832,8 @@ static void box_layout_mouse_click(void *data, const struct obs_mouse_event *eve
 	struct box_rect rect;
 	const int index = hit_test_box(layout, event->x, event->y, &edges, &rect);
 	if (index < 0) {
-		blog(LOG_INFO, "[obs-box-layouts] editor mouse-down outside boxes x=%d y=%d canvas=%ux%u",
-		     event->x, event->y, layout->width, layout->height);
+		blog(LOG_INFO, "[obs-box-layouts] editor mouse-down outside boxes x=%d y=%d canvas=%ux%u", event->x,
+		     event->y, layout->width, layout->height);
 		layout->dragging = false;
 		pthread_mutex_unlock(&layout->mutex);
 		return;
@@ -872,9 +868,8 @@ static void box_layout_mouse_click(void *data, const struct obs_mouse_event *eve
 	layout->drag_start_rect = rect;
 	layout->drag_start_pan_x = layout->boxes[index].pan_x;
 	layout->drag_start_pan_y = layout->boxes[index].pan_y;
-	blog(LOG_INFO,
-	     "[obs-box-layouts] editor mouse-down box=%d x=%d y=%d modifiers=%d mode=%s edges=%u",
-	     index + 1, event->x, event->y, event->modifiers,
+	blog(LOG_INFO, "[obs-box-layouts] editor mouse-down box=%d x=%d y=%d modifiers=%d mode=%s edges=%u", index + 1,
+	     event->x, event->y, event->modifiers,
 	     content_drag ? "pan-content" : (edges == RESIZE_NONE ? "move-box" : "resize-box"), edges);
 	pthread_mutex_unlock(&layout->mutex);
 }
@@ -900,8 +895,7 @@ static void box_layout_mouse_move(void *data, const struct obs_mouse_event *even
 	const float canvas_height = (float)layout->height;
 	const float minimum_size = 40.0f;
 	if (!layout->drag_move_logged && (fabsf(dx) >= 1.0f || fabsf(dy) >= 1.0f)) {
-		blog(LOG_INFO, "[obs-box-layouts] editor drag received box=%d dx=%.1f dy=%.1f", index + 1, dx,
-		     dy);
+		blog(LOG_INFO, "[obs-box-layouts] editor drag received box=%d dx=%.1f dy=%.1f", index + 1, dx, dy);
 		layout->drag_move_logged = true;
 	}
 	if (layout->drag_content) {
@@ -975,8 +969,8 @@ static void box_layout_mouse_wheel(void *data, const struct obs_mouse_event *eve
 	struct box_rect rect;
 	const int index = hit_test_box(layout, event->x, event->y, &edges, &rect);
 	if (index >= 0)
-		layout->boxes[index].zoom = fmaxf(1.0f, fminf(4.0f, layout->boxes[index].zoom +
-									       (y_delta > 0 ? 0.1f : -0.1f)));
+		layout->boxes[index].zoom =
+			fmaxf(1.0f, fminf(4.0f, layout->boxes[index].zoom + (y_delta > 0 ? 0.1f : -0.1f)));
 	pthread_mutex_unlock(&layout->mutex);
 	if (index >= 0) {
 		blog(LOG_INFO, "[obs-box-layouts] editor wheel box=%d delta=%d", index + 1, y_delta);
@@ -1130,8 +1124,8 @@ static bool preset_modified(obs_properties_t *properties, obs_property_t *proper
 	if (gap)
 		obs_property_set_visible(gap, !custom);
 
-	static const char *geometry_suffixes[] = {"custom_x", "custom_y", "custom_width", "custom_height", "z_index",
-						    "lock_aspect", "custom_help"};
+	static const char *geometry_suffixes[] = {"custom_x", "custom_y",    "custom_width", "custom_height",
+						  "z_index",  "lock_aspect", "custom_help"};
 	char key[64];
 	for (int i = 0; i < MAX_BOXES; i++) {
 		box_key(key, sizeof(key), i, "group");
@@ -1165,10 +1159,10 @@ static obs_properties_t *box_layout_properties(void *data)
 	struct box_layout *layout = data;
 	obs_properties_t *properties = obs_properties_create();
 	obs_properties_add_text(properties, "visual_editor_help", obs_module_text("Editor.Help"), OBS_TEXT_INFO);
-	obs_properties_add_button2(properties, "open_visual_editor", obs_module_text("Editor.Open"),
-				   open_visual_editor, layout);
+	obs_properties_add_button2(properties, "open_visual_editor", obs_module_text("Editor.Open"), open_visual_editor,
+				   layout);
 	obs_property_t *preset = obs_properties_add_list(properties, "preset", obs_module_text("Preset"),
-							  OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+							 OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
 	obs_property_list_add_int(preset, obs_module_text("Preset.Single"), PRESET_SINGLE);
 	obs_property_list_add_int(preset, obs_module_text("Preset.TwoColumns"), PRESET_TWO_COLUMNS);
 	obs_property_list_add_int(preset, obs_module_text("Preset.TwoRows"), PRESET_TWO_ROWS);
@@ -1182,14 +1176,14 @@ static obs_properties_t *box_layout_properties(void *data)
 
 	obs_properties_add_int(properties, "width", obs_module_text("Canvas.Width"), 320, 7680, 1);
 	obs_properties_add_int(properties, "height", obs_module_text("Canvas.Height"), 180, 4320, 1);
-	obs_property_t *custom_count = obs_properties_add_int_slider(properties, "custom_box_count",
-								     obs_module_text("Custom.BoxCount"), 1, MAX_BOXES, 1);
+	obs_property_t *custom_count = obs_properties_add_int_slider(
+		properties, "custom_box_count", obs_module_text("Custom.BoxCount"), 1, MAX_BOXES, 1);
 	obs_property_set_modified_callback(custom_count, preset_modified);
 	obs_properties_add_float_slider(properties, "gap", obs_module_text("Gap"), 0.0, 200.0, 1.0);
 	obs_properties_add_color_alpha(properties, "background_color", obs_module_text("Background.Color"));
 	obs_property_t *background = obs_properties_add_list(properties, "background_source",
-							      obs_module_text("Background.Source"), OBS_COMBO_TYPE_LIST,
-							      OBS_COMBO_FORMAT_STRING);
+							     obs_module_text("Background.Source"), OBS_COMBO_TYPE_LIST,
+							     OBS_COMBO_FORMAT_STRING);
 	populate_source_list(background, layout ? layout->context : NULL);
 
 	char key[64];
