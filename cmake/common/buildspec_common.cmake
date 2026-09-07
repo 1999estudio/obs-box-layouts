@@ -52,6 +52,25 @@ function(_setup_obs_studio)
     set(_is_fresh --fresh)
   endif()
 
+  # OBS 32.0.x does not explicitly enable Swift when plugins are disabled,
+  # which breaks the out-of-tree macOS build as soon as libobs-metal is added.
+  # This mirrors the upstream fix merged in obsproject/obs-studio#13250 while
+  # keeping the generated plugin compatible with OBS Studio 32.0.3.
+  if(OS_MACOS)
+    set(_obs_metal_cmake "${dependencies_dir}/${_obs_destination}/libobs-metal/CMakeLists.txt")
+    file(READ "${_obs_metal_cmake}" _obs_metal_contents)
+    if(NOT _obs_metal_contents MATCHES "enable_language\\(Swift\\)")
+      string(
+        REPLACE
+          "add_library(libobs-metal SHARED)"
+          "enable_language(Swift)\n\nadd_library(libobs-metal SHARED)"
+          _obs_metal_contents
+          "${_obs_metal_contents}"
+      )
+      file(WRITE "${_obs_metal_cmake}" "${_obs_metal_contents}")
+    endif()
+  endif()
+
   if(OS_WINDOWS)
     set(_cmake_generator "${CMAKE_GENERATOR}")
     set(_cmake_arch "-A ${arch},version=${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}")
