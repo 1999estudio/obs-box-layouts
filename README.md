@@ -1,6 +1,7 @@
 # OBS Box Layouts
 
-> **Windows:** usa la versión 0.7.2 o posterior. Incluye correcciones para la inicialización gráfica con Direct3D,
+> **Windows:** usa la versión 0.7.3 o posterior. Incluye un renderizador compatible con Direct3D para bordes,
+> colores y esquinas redondeadas, además de las correcciones de inicialización gráfica,
 > el renderizado de fuentes dentro de los boxes y el cierre seguro de la ventana **Interactuar**.
 
 Plugin nativo para OBS Studio que crea composiciones multicaja al estilo de los *layers* de vMix. Se añade a una

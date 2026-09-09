@@ -17,6 +17,9 @@
 
 #define MAX_BOXES 6
 #define MAX_CHILDREN (MAX_BOXES + 1)
+#define ROUNDED_CORNER_SEGMENTS 12
+#define ROUNDED_PERIMETER_POINTS (4 * (ROUNDED_CORNER_SEGMENTS + 1))
+#define PI_F 3.14159265358979323846f
 
 enum layout_preset {
 	PRESET_SINGLE = 0,
@@ -440,7 +443,7 @@ static void *box_layout_create(obs_data_t *settings, obs_source_t *source)
 	}
 
 	if (!layout->texrender || !layout->blank_texture || !layout->effect_ready) {
-		blog(LOG_WARNING, "[obs-box-layouts] custom graphics unavailable; using safe rectangular fallback: %s",
+		blog(LOG_WARNING, "[obs-box-layouts] custom effect unavailable; using native rounded-box renderer: %s",
 		     error ? error : "required graphics resource or effect parameter is missing");
 	}
 	bfree(error);
@@ -522,36 +525,147 @@ static void calculate_cover_uv(uint32_t source_width, uint32_t source_height, fl
 	offset->y = (1.0f - scale->y) * (0.5f + 0.5f * fmaxf(-1.0f, fminf(1.0f, pan_y)));
 }
 
+static size_t rounded_perimeter(const struct box_rect *rect, float radius, struct vec2 points[ROUNDED_PERIMETER_POINTS])
+{
+	const float max_radius = fminf(rect->width, rect->height) * 0.5f;
+	radius = fminf(fmaxf(radius, 0.0f), max_radius);
+
+	const float centers_x[] = {rect->x + radius, rect->x + rect->width - radius, rect->x + rect->width - radius,
+				   rect->x + radius};
+	const float centers_y[] = {rect->y + radius, rect->y + radius, rect->y + rect->height - radius,
+				   rect->y + rect->height - radius};
+	const float start_angles[] = {PI_F, -PI_F * 0.5f, 0.0f, PI_F * 0.5f};
+	size_t point = 0;
+	for (size_t corner = 0; corner < 4; corner++) {
+		for (size_t segment = 0; segment <= ROUNDED_CORNER_SEGMENTS; segment++) {
+			const float angle =
+				start_angles[corner] + (PI_F * 0.5f * (float)segment / (float)ROUNDED_CORNER_SEGMENTS);
+			vec2_set(&points[point++], centers_x[corner] + cosf(angle) * radius,
+				 centers_y[corner] + sinf(angle) * radius);
+		}
+	}
+	return point;
+}
+
+static void textured_vertex(const struct vec2 *point, const struct box_rect *rect, const struct vec2 *uv_scale,
+			    const struct vec2 *uv_offset)
+{
+	const float u = uv_offset->x + ((point->x - rect->x) / rect->width) * uv_scale->x;
+	const float v = uv_offset->y + ((point->y - rect->y) / rect->height) * uv_scale->y;
+	gs_texcoord(u, v, 0);
+	gs_vertex2f(point->x, point->y);
+}
+
+static void draw_rounded_texture(gs_texture_t *texture, const struct box_rect *rect, float radius,
+				 const struct vec2 *uv_scale, const struct vec2 *uv_offset)
+{
+	struct vec2 perimeter[ROUNDED_PERIMETER_POINTS];
+	const size_t count = rounded_perimeter(rect, radius, perimeter);
+	struct vec2 center;
+	vec2_set(&center, rect->x + rect->width * 0.5f, rect->y + rect->height * 0.5f);
+
+	gs_effect_t *effect = obs_get_base_effect(OBS_EFFECT_DEFAULT);
+	gs_eparam_t *image = gs_effect_get_param_by_name(effect, "image");
+	gs_effect_set_texture(image, texture);
+	while (gs_effect_loop(effect, "Draw")) {
+		gs_render_start(false);
+		for (size_t i = 0; i < count; i++) {
+			const size_t next = (i + 1) % count;
+			textured_vertex(&center, rect, uv_scale, uv_offset);
+			textured_vertex(&perimeter[i], rect, uv_scale, uv_offset);
+			textured_vertex(&perimeter[next], rect, uv_scale, uv_offset);
+		}
+		gs_render_stop(GS_TRIS);
+	}
+}
+
+static void solid_vertex(const struct vec2 *point)
+{
+	gs_vertex2f(point->x, point->y);
+}
+
+static void draw_rounded_border(const struct box_rect *rect, float radius, float border_width, uint32_t border_color)
+{
+	const float max_border = fminf(rect->width, rect->height) * 0.5f;
+	border_width = fminf(fmaxf(border_width, 0.0f), max_border);
+	if (border_width < 0.5f)
+		return;
+
+	struct vec2 outer[ROUNDED_PERIMETER_POINTS];
+	struct vec2 inner[ROUNDED_PERIMETER_POINTS];
+	const size_t outer_count = rounded_perimeter(rect, radius, outer);
+	struct box_rect inner_rect = {
+		.x = rect->x + border_width,
+		.y = rect->y + border_width,
+		.width = rect->width - border_width * 2.0f,
+		.height = rect->height - border_width * 2.0f,
+	};
+
+	struct vec4 color;
+	vec4_from_rgba(&color, border_color);
+	gs_effect_t *effect = obs_get_base_effect(OBS_EFFECT_SOLID);
+	gs_eparam_t *color_param = gs_effect_get_param_by_name(effect, "color");
+	gs_effect_set_vec4(color_param, &color);
+
+	if (inner_rect.width < 1.0f || inner_rect.height < 1.0f) {
+		struct vec2 center;
+		vec2_set(&center, rect->x + rect->width * 0.5f, rect->y + rect->height * 0.5f);
+		while (gs_effect_loop(effect, "Solid")) {
+			gs_render_start(false);
+			for (size_t i = 0; i < outer_count; i++) {
+				const size_t next = (i + 1) % outer_count;
+				solid_vertex(&center);
+				solid_vertex(&outer[i]);
+				solid_vertex(&outer[next]);
+			}
+			gs_render_stop(GS_TRIS);
+		}
+		return;
+	}
+
+	rounded_perimeter(&inner_rect, fmaxf(radius - border_width, 0.0f), inner);
+
+	while (gs_effect_loop(effect, "Solid")) {
+		gs_render_start(false);
+		for (size_t i = 0; i < ROUNDED_PERIMETER_POINTS; i++) {
+			const size_t next = (i + 1) % ROUNDED_PERIMETER_POINTS;
+			solid_vertex(&outer[i]);
+			solid_vertex(&inner[i]);
+			solid_vertex(&inner[next]);
+			solid_vertex(&outer[i]);
+			solid_vertex(&inner[next]);
+			solid_vertex(&outer[next]);
+		}
+		gs_render_stop(GS_TRIS);
+	}
+}
+
+static void draw_native_masked_texture(gs_texture_t *texture, uint32_t source_width, uint32_t source_height,
+				       const struct box_rect *rect, float zoom, float pan_x, float pan_y, float radius,
+				       float border_width, uint32_t border_color)
+{
+	if (texture) {
+		struct vec2 uv_scale;
+		struct vec2 uv_offset;
+		calculate_cover_uv(source_width, source_height, rect->width, rect->height, zoom, pan_x, pan_y,
+				   &uv_scale, &uv_offset);
+		draw_rounded_texture(texture, rect, radius, &uv_scale, &uv_offset);
+	}
+	draw_rounded_border(rect, radius, border_width, border_color);
+	gs_load_texture(NULL, 0);
+}
+
 static void draw_masked_texture(struct box_layout *layout, gs_texture_t *texture, uint32_t source_width,
 				uint32_t source_height, const struct box_rect *rect, float zoom, float pan_x,
 				float pan_y, float radius, float border_width, uint32_t border_color)
 {
 	if (!layout->effect_ready) {
 		if (!layout->graphics_warning_logged) {
-			blog(LOG_WARNING, "[obs-box-layouts] rendering boxes without rounded corners or borders");
+			blog(LOG_WARNING, "[obs-box-layouts] using native rounded-box renderer");
 			layout->graphics_warning_logged = true;
 		}
-		if (!texture)
-			return;
-
-		gs_effect_t *effect = obs_get_base_effect(OBS_EFFECT_DEFAULT);
-		gs_eparam_t *image = gs_effect_get_param_by_name(effect, "image");
-		gs_effect_set_texture(image, texture);
-		struct vec2 uv_scale;
-		struct vec2 uv_offset;
-		calculate_cover_uv(source_width, source_height, rect->width, rect->height, zoom, pan_x, pan_y,
-				   &uv_scale, &uv_offset);
-		const uint32_t crop_x = (uint32_t)fmaxf(0.0f, floorf(uv_offset.x * source_width));
-		const uint32_t crop_y = (uint32_t)fmaxf(0.0f, floorf(uv_offset.y * source_height));
-		const uint32_t crop_width = (uint32_t)fmaxf(1.0f, floorf(uv_scale.x * source_width));
-		const uint32_t crop_height = (uint32_t)fmaxf(1.0f, floorf(uv_scale.y * source_height));
-		gs_matrix_push();
-		gs_matrix_translate3f(rect->x, rect->y, 0.0f);
-		gs_matrix_scale3f(rect->width / crop_width, rect->height / crop_height, 1.0f);
-		while (gs_effect_loop(effect, "Draw"))
-			gs_draw_sprite_subregion(texture, 0, crop_x, crop_y, crop_width, crop_height);
-		gs_matrix_pop();
-		gs_load_texture(NULL, 0);
+		draw_native_masked_texture(texture, source_width, source_height, rect, zoom, pan_x, pan_y, radius,
+					   border_width, border_color);
 		return;
 	}
 
