@@ -43,6 +43,12 @@ namespace {
 constexpr const char *DOCK_ID = "obs-box-layouts-live-control";
 constexpr int MAX_BOXES = 6;
 constexpr int PRESET_CUSTOM = 8;
+constexpr int TARGET_PREVIEW = 0;
+constexpr int TARGET_PROGRAM = 1;
+constexpr int FIT_FILL = 0;
+constexpr int FIT_CONTAIN = 1;
+constexpr int FIT_STRETCH = 2;
+constexpr int FIT_MANUAL = 3;
 
 enum ResizeEdges {
 	ResizeNone = 0,
@@ -57,6 +63,7 @@ struct EditorBox {
 	double zoom = 1.0;
 	double pan_x = 0.0;
 	double pan_y = 0.0;
+	int fit_mode = FIT_FILL;
 	int z_index = 0;
 	bool lock_aspect = false;
 	QString source_name;
@@ -156,8 +163,8 @@ void calculate_preset_rects(EditorLayout &layout)
 	default:
 		for (int row = 0; row < 2; row++)
 			for (int column = 0; column < 3; column++)
-				set_box_rect(layout, row * 3 + column, column * (third_w + g),
-					     row * (half_h + g), third_w, half_h);
+				set_box_rect(layout, row * 3 + column, column * (third_w + g), row * (half_h + g),
+					     third_w, half_h);
 		break;
 	}
 }
@@ -187,6 +194,8 @@ EditorLayout load_layout(obs_source_t *source)
 		layout.boxes[i].pan_x = obs_data_get_double(settings, key);
 		snprintf(key, sizeof(key), "box_%d_pan_y", i + 1);
 		layout.boxes[i].pan_y = obs_data_get_double(settings, key);
+		snprintf(key, sizeof(key), "box_%d_fit_mode", i + 1);
+		layout.boxes[i].fit_mode = static_cast<int>(obs_data_get_int(settings, key));
 		snprintf(key, sizeof(key), "box_%d_z_index", i + 1);
 		layout.boxes[i].z_index = static_cast<int>(obs_data_get_int(settings, key));
 		snprintf(key, sizeof(key), "box_%d_lock_aspect", i + 1);
@@ -254,11 +263,23 @@ void update_content(obs_source_t *source, int index, double zoom, double pan_x, 
 	obs_data_t *settings = obs_source_get_settings(source);
 	char key[64];
 	snprintf(key, sizeof(key), "box_%d_zoom", index + 1);
-	obs_data_set_double(settings, key, std::clamp(zoom, 1.0, 4.0));
+	obs_data_set_double(settings, key, std::clamp(zoom, 0.1, 4.0));
 	snprintf(key, sizeof(key), "box_%d_pan_x", index + 1);
 	obs_data_set_double(settings, key, std::clamp(pan_x, -100.0, 100.0));
 	snprintf(key, sizeof(key), "box_%d_pan_y", index + 1);
 	obs_data_set_double(settings, key, std::clamp(pan_y, -100.0, 100.0));
+	obs_source_update(source, settings);
+	obs_data_release(settings);
+}
+
+void update_fit_mode(obs_source_t *source, int index, int fit_mode)
+{
+	if (!source || index < 0 || index >= MAX_BOXES)
+		return;
+	obs_data_t *settings = obs_source_get_settings(source);
+	char key[64];
+	snprintf(key, sizeof(key), "box_%d_fit_mode", index + 1);
+	obs_data_set_int(settings, key, std::clamp(fit_mode, FIT_FILL, FIT_MANUAL));
 	obs_source_update(source, settings);
 	obs_data_release(settings);
 }
@@ -329,9 +350,8 @@ protected:
 		std::array<int, MAX_BOXES> order{};
 		for (int i = 0; i < layout.count; i++)
 			order[i] = i;
-		std::stable_sort(order.begin(), order.begin() + layout.count, [&layout](int a, int b) {
-			return layout.boxes[a].z_index < layout.boxes[b].z_index;
-		});
+		std::stable_sort(order.begin(), order.begin() + layout.count,
+				 [&layout](int a, int b) { return layout.boxes[a].z_index < layout.boxes[b].z_index; });
 		for (int position = 0; position < layout.count; position++) {
 			const int index = order[position];
 			const QRectF box = canvas_to_widget(layout.boxes[index].rect, layout);
@@ -347,7 +367,8 @@ protected:
 					 QStringLiteral("BOX %1\n%2").arg(index + 1).arg(name));
 			if (selected) {
 				painter.setBrush(QColor(75, 190, 255));
-				for (const QPointF &handle : {box.topLeft(), box.topRight(), box.bottomLeft(), box.bottomRight()})
+				for (const QPointF &handle :
+				     {box.topLeft(), box.topRight(), box.bottomLeft(), box.bottomRight()})
 					painter.drawRect(QRectF(handle.x() - 4, handle.y() - 4, 8, 8));
 			}
 		}
@@ -382,7 +403,7 @@ protected:
 		start_pan_x = layout.boxes[hit].pan_x;
 		start_pan_y = layout.boxes[hit].pan_y;
 		drag_content = event->modifiers().testFlag(Qt::ControlModifier) ||
-			event->modifiers().testFlag(Qt::MetaModifier);
+			       event->modifiers().testFlag(Qt::MetaModifier);
 		drag_edges = detect_edges(event->position(), layout.boxes[hit].rect, layout);
 		if (event->modifiers().testFlag(Qt::ShiftModifier))
 			drag_edges = ResizeRight | ResizeBottom;
@@ -401,6 +422,9 @@ protected:
 		const QPointF point = widget_to_canvas(event->position(), baseline);
 		const QPointF delta = point - drag_start;
 		if (drag_content) {
+			if (baseline.boxes[selected_box].fit_mode != FIT_FILL &&
+			    baseline.boxes[selected_box].fit_mode != FIT_MANUAL)
+				update_fit_mode(source, selected_box, FIT_MANUAL);
 			const double pan_x = start_pan_x - 200.0 * delta.x() / std::max(start_rect.width(), 1.0);
 			const double pan_y = start_pan_y - 200.0 * delta.y() / std::max(start_rect.height(), 1.0);
 			update_content(source, selected_box, baseline.boxes[selected_box].zoom, pan_x, pan_y);
@@ -431,6 +455,8 @@ protected:
 			selected_box = hit;
 			if (before_edit)
 				before_edit();
+			if (layout.boxes[hit].fit_mode != FIT_FILL && layout.boxes[hit].fit_mode != FIT_MANUAL)
+				update_fit_mode(source, hit, FIT_MANUAL);
 			const double amount = event->angleDelta().y() >= 0 ? 0.1 : -0.1;
 			update_content(source, hit, layout.boxes[hit].zoom + amount, layout.boxes[hit].pan_x,
 				       layout.boxes[hit].pan_y);
@@ -461,10 +487,7 @@ protected:
 	}
 
 private:
-	obs_source_t *strong_source() const
-	{
-		return weak_source ? obs_weak_source_get_source(weak_source) : nullptr;
-	}
+	obs_source_t *strong_source() const { return weak_source ? obs_weak_source_get_source(weak_source) : nullptr; }
 
 	QRectF display_area(const EditorLayout &layout) const
 	{
@@ -496,9 +519,8 @@ private:
 		std::array<int, MAX_BOXES> order{};
 		for (int i = 0; i < layout.count; i++)
 			order[i] = i;
-		std::stable_sort(order.begin(), order.begin() + layout.count, [&layout](int a, int b) {
-			return layout.boxes[a].z_index < layout.boxes[b].z_index;
-		});
+		std::stable_sort(order.begin(), order.begin() + layout.count,
+				 [&layout](int a, int b) { return layout.boxes[a].z_index < layout.boxes[b].z_index; });
 		for (int i = layout.count - 1; i >= 0; i--)
 			if (layout.boxes[order[i]].rect.contains(point))
 				return order[i];
@@ -525,10 +547,12 @@ private:
 	{
 		const double minimum = 40.0;
 		if (drag_edges == ResizeNone) {
-			const double x = std::clamp(start_rect.x() + delta.x(), 0.0,
-						    std::max(0.0, static_cast<double>(layout.width) - start_rect.width()));
-			const double y = std::clamp(start_rect.y() + delta.y(), 0.0,
-						    std::max(0.0, static_cast<double>(layout.height) - start_rect.height()));
+			const double x =
+				std::clamp(start_rect.x() + delta.x(), 0.0,
+					   std::max(0.0, static_cast<double>(layout.width) - start_rect.width()));
+			const double y =
+				std::clamp(start_rect.y() + delta.y(), 0.0,
+					   std::max(0.0, static_cast<double>(layout.height) - start_rect.height()));
 			return QRectF(x, y, start_rect.width(), start_rect.height());
 		}
 		double left = start_rect.left();
@@ -624,6 +648,9 @@ public:
 		program_label->setFont(heading);
 		root->addWidget(program_label);
 
+		target_selector = new QComboBox(this);
+		root->addWidget(target_selector);
+
 		layout_selector = new QComboBox(this);
 		root->addWidget(layout_selector);
 		unlock = new QCheckBox(tr_text("Live.Unlock"), this);
@@ -652,23 +679,29 @@ public:
 			auto *control = new QPushButton(QString::fromUtf8(button.first), this);
 			nudge_buttons[button_index++] = control;
 			control->setMaximumWidth(42);
-			connect(control, &QPushButton::clicked, this, [this, direction = button.second]() {
-				nudge_selected(direction);
-			});
+			connect(control, &QPushButton::clicked, this,
+				[this, direction = button.second]() { nudge_selected(direction); });
 			nudge->addWidget(control);
 		}
 		root->addLayout(nudge);
 
 		auto *content_grid = new QGridLayout;
-		zoom = make_slider(100, 400);
+		fit_selector = new QComboBox(this);
+		fit_selector->addItem(tr_text("Fit.Fill"), FIT_FILL);
+		fit_selector->addItem(tr_text("Fit.Contain"), FIT_CONTAIN);
+		fit_selector->addItem(tr_text("Fit.Stretch"), FIT_STRETCH);
+		fit_selector->addItem(tr_text("Fit.Manual"), FIT_MANUAL);
+		zoom = make_slider(10, 400);
 		pan_x = make_slider(-100, 100);
 		pan_y = make_slider(-100, 100);
-		content_grid->addWidget(new QLabel(tr_text("Live.Zoom"), this), 0, 0);
-		content_grid->addWidget(zoom, 0, 1);
-		content_grid->addWidget(new QLabel(tr_text("Live.PanX"), this), 1, 0);
-		content_grid->addWidget(pan_x, 1, 1);
-		content_grid->addWidget(new QLabel(tr_text("Live.PanY"), this), 2, 0);
-		content_grid->addWidget(pan_y, 2, 1);
+		content_grid->addWidget(new QLabel(tr_text("Live.FitMode"), this), 0, 0);
+		content_grid->addWidget(fit_selector, 0, 1);
+		content_grid->addWidget(new QLabel(tr_text("Live.Zoom"), this), 1, 0);
+		content_grid->addWidget(zoom, 1, 1);
+		content_grid->addWidget(new QLabel(tr_text("Live.PanX"), this), 2, 0);
+		content_grid->addWidget(pan_x, 2, 1);
+		content_grid->addWidget(new QLabel(tr_text("Live.PanY"), this), 3, 0);
+		content_grid->addWidget(pan_y, 3, 1);
 		root->addLayout(content_grid);
 
 		auto *actions = new QHBoxLayout;
@@ -682,17 +715,39 @@ public:
 			unlock->setChecked(false);
 			refresh_selected_source();
 		});
+		connect(target_selector, &QComboBox::currentIndexChanged, this, [this](int) {
+			unlock->setChecked(false);
+			program_uuid.clear();
+			layout_signature.clear();
+			refresh_program();
+		});
 		connect(unlock, &QCheckBox::toggled, this, [this](bool checked) {
 			canvas->set_locked(!checked);
 			update_lock_ui();
 		});
-		canvas->before_edit = [this]() { push_undo(); };
-		canvas->selection_changed = [this](int) { refresh_controls(); };
+		canvas->before_edit = [this]() {
+			push_undo();
+		};
+		canvas->selection_changed = [this](int) {
+			refresh_controls();
+		};
 		connect(undo, &QPushButton::clicked, this, [this]() { undo_last(); });
 		connect(reset_content, &QPushButton::clicked, this, [this]() { reset_selected_content(); });
 		connect_slider(zoom, 0);
 		connect_slider(pan_x, 1);
 		connect_slider(pan_y, 2);
+		connect(fit_selector, &QComboBox::currentIndexChanged, this, [this](int) {
+			if (!unlock->isChecked())
+				return;
+			obs_source_t *source = selected_source();
+			if (!source)
+				return;
+			push_undo();
+			update_fit_mode(source, canvas->selection(), fit_selector->currentData().toInt());
+			obs_source_release(source);
+			canvas->update();
+			refresh_controls();
+		});
 
 		timer = new QTimer(this);
 		timer->setInterval(250);
@@ -703,6 +758,31 @@ public:
 	}
 
 private:
+	bool preview_target() const
+	{
+		return obs_frontend_preview_program_mode_active() &&
+		       target_selector->currentData().toInt() == TARGET_PREVIEW;
+	}
+
+	void refresh_target_choices()
+	{
+		const bool studio = obs_frontend_preview_program_mode_active();
+		if (studio == studio_mode_known && target_selector->count() > 0)
+			return;
+		const int previous = target_selector->count() > 0 ? target_selector->currentData().toInt()
+								  : TARGET_PREVIEW;
+		const QSignalBlocker blocker(target_selector);
+		target_selector->clear();
+		if (studio)
+			target_selector->addItem(tr_text("Target.Preview"), TARGET_PREVIEW);
+		target_selector->addItem(tr_text("Target.Program"), TARGET_PROGRAM);
+		const int retained = target_selector->findData(studio ? previous : TARGET_PROGRAM);
+		target_selector->setCurrentIndex(retained >= 0 ? retained : 0);
+		studio_mode_known = studio;
+		program_uuid.clear();
+		layout_signature.clear();
+	}
+
 	QSlider *make_slider(int minimum, int maximum)
 	{
 		auto *slider = new QSlider(Qt::Horizontal, this);
@@ -722,6 +802,9 @@ private:
 			const EditorLayout layout = load_layout(source);
 			const int index = canvas->selection();
 			if (index < layout.count) {
+				if (layout.boxes[index].fit_mode != FIT_FILL &&
+				    layout.boxes[index].fit_mode != FIT_MANUAL)
+					update_fit_mode(source, index, FIT_MANUAL);
 				double next_zoom = layout.boxes[index].zoom;
 				double next_pan_x = layout.boxes[index].pan_x;
 				double next_pan_y = layout.boxes[index].pan_y;
@@ -740,8 +823,11 @@ private:
 
 	void refresh_program()
 	{
+		refresh_target_choices();
 		LayoutScan scan;
-		obs_source_t *program = obs_frontend_get_current_scene();
+		const bool preview = preview_target();
+		obs_source_t *program = preview ? obs_frontend_get_current_preview_scene()
+						: obs_frontend_get_current_scene();
 		QString next_program_uuid;
 		QString program_name;
 		if (program) {
@@ -765,18 +851,35 @@ private:
 			layout_selector->clear();
 			for (obs_source_t *layout : scan.layouts)
 				layout_selector->addItem(QString::fromUtf8(obs_source_get_name(layout)),
-						 QString::fromUtf8(obs_source_get_uuid(layout)));
+							 QString::fromUtf8(obs_source_get_uuid(layout)));
 			const int retained = layout_selector->findData(selected_uuid);
 			if (retained >= 0)
 				layout_selector->setCurrentIndex(retained);
 			layout_signature = signature;
 			refresh_selected_source();
 		}
+		preview_shared = false;
+		if (preview) {
+			LayoutScan program_scan;
+			obs_source_t *on_air = obs_frontend_get_current_scene();
+			if (on_air) {
+				scan_layouts(on_air, program_scan);
+				obs_source_release(on_air);
+			}
+			const QString selected_uuid = layout_selector->currentData().toString();
+			for (obs_source_t *candidate : program_scan.layouts) {
+				if (selected_uuid == QString::fromUtf8(obs_source_get_uuid(candidate)))
+					preview_shared = true;
+				obs_source_release(candidate);
+			}
+		}
 
-		program_label->setText(scan.layouts.empty() ? tr_text("Live.NoLayout")
-							      : tr_text("Live.ProgramScene").arg(program_name));
+		program_label->setText(
+			scan.layouts.empty()
+				? tr_text(preview ? "Live.NoPreviewLayout" : "Live.NoLayout")
+				: tr_text(preview ? "Live.PreviewScene" : "Live.ProgramScene").arg(program_name));
 		layout_selector->setVisible(scan.layouts.size() > 1);
-		refresh_controls();
+		update_lock_ui();
 		for (obs_source_t *layout : scan.layouts)
 			obs_source_release(layout);
 	}
@@ -815,6 +918,11 @@ private:
 						.arg(qRound(box.rect.y()))
 						.arg(qRound(box.rect.width()))
 						.arg(qRound(box.rect.height())));
+		{
+			const QSignalBlocker blocker(fit_selector);
+			const int fit_index = fit_selector->findData(box.fit_mode);
+			fit_selector->setCurrentIndex(fit_index >= 0 ? fit_index : 0);
+		}
 		if (!zoom->isSliderDown()) {
 			const QSignalBlocker blocker(zoom);
 			zoom->setValue(qRound(box.zoom * 100.0));
@@ -835,6 +943,7 @@ private:
 	void set_controls_enabled(bool enabled)
 	{
 		step_selector->setEnabled(enabled);
+		fit_selector->setEnabled(enabled);
 		for (QPushButton *button : nudge_buttons)
 			button->setEnabled(enabled);
 		zoom->setEnabled(enabled);
@@ -847,11 +956,31 @@ private:
 	void update_lock_ui()
 	{
 		const bool has_source = canvas->has_source();
+		const bool preview = preview_target();
+		unlock->setText(tr_text(preview ? "Live.UnlockPreview" : "Live.Unlock"));
+		if (preview_shared) {
+			if (unlock->isChecked()) {
+				const QSignalBlocker blocker(unlock);
+				unlock->setChecked(false);
+				canvas->set_locked(true);
+			}
+			unlock->setEnabled(false);
+			lock_status->setText(tr_text("Live.SharedWarning"));
+			lock_status->setStyleSheet(
+				QStringLiteral("background:#a86616;color:white;padding:5px;font-weight:bold;"));
+			set_controls_enabled(false);
+			return;
+		}
 		unlock->setEnabled(has_source);
 		const bool editing = unlock->isChecked() && has_source;
-		lock_status->setText(editing ? tr_text("Live.OnAirWarning") : tr_text("Live.Locked"));
-		lock_status->setStyleSheet(editing ? QStringLiteral("background:#9f2530;color:white;padding:5px;font-weight:bold;")
-							 : QStringLiteral("background:#3d434b;color:white;padding:5px;"));
+		lock_status->setText(editing ? tr_text(preview ? "Live.PreviewEditing" : "Live.OnAirWarning")
+					     : tr_text("Live.Locked"));
+		lock_status->setStyleSheet(
+			editing ? (preview ? QStringLiteral(
+						     "background:#176a91;color:white;padding:5px;font-weight:bold;")
+					   : QStringLiteral(
+						     "background:#9f2530;color:white;padding:5px;font-weight:bold;"))
+				: QStringLiteral("background:#3d434b;color:white;padding:5px;"));
 		set_controls_enabled(editing);
 	}
 
@@ -942,12 +1071,14 @@ private:
 	}
 
 	QLabel *program_label = nullptr;
+	QComboBox *target_selector = nullptr;
 	QComboBox *layout_selector = nullptr;
 	QCheckBox *unlock = nullptr;
 	QLabel *lock_status = nullptr;
 	LayoutCanvas *canvas = nullptr;
 	QLabel *selected_label = nullptr;
 	QComboBox *step_selector = nullptr;
+	QComboBox *fit_selector = nullptr;
 	std::array<QPushButton *, 4> nudge_buttons{};
 	QSlider *zoom = nullptr;
 	QSlider *pan_x = nullptr;
@@ -958,6 +1089,8 @@ private:
 	QString program_uuid;
 	QString layout_signature;
 	std::vector<UndoEntry> undo_stack;
+	bool studio_mode_known = false;
+	bool preview_shared = false;
 };
 
 LiveControl *live_control = nullptr;

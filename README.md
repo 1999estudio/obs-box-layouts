@@ -1,6 +1,6 @@
 # OBS Box Layouts
 
-> **Windows:** usa la versión 0.7.3 o posterior. Incluye un renderizador compatible con Direct3D para bordes,
+> **Windows:** usa la versión 0.8.0 o posterior. Incluye un renderizador compatible con Direct3D para bordes,
 > colores y esquinas redondeadas, además de las correcciones de inicialización gráfica,
 > el renderizado de fuentes dentro de los boxes y el cierre seguro de la ventana **Interactuar**.
 
@@ -132,35 +132,42 @@ El dock se abre automáticamente después de instalar la versión 0.3.0. Si lo c
 El monitor utiliza la API de medios controlables de OBS. Las fuentes multimedia y listas VLC son compatibles; un video
 reproducido dentro de una fuente Navegador no expone necesariamente estos controles a OBS.
 
-## Control en vivo
+## Preparación y control en vivo
 
-El segundo dock se abre automáticamente y también está disponible en **Paneles → Box Layouts – Control en vivo**.
-Solo muestra instancias de **Layout de boxes** presentes en la escena que está en Program; si hay más de una, permite
-elegir cuál editar.
+El segundo dock se abre automáticamente y también está disponible en **Paneles → Box Layouts – Control en vivo**. En
+modo estudio permite elegir **PREVIEW** para preparar la próxima escena o **PROGRAM** para corregir el layout que ya
+está al aire. Fuera del modo estudio utiliza Program.
 
-Por seguridad, la edición comienza bloqueada y vuelve a bloquearse cada vez que cambia la escena en Program. Después de
-activar **Desbloquear edición en Program**:
+Por seguridad, la edición comienza bloqueada y vuelve a bloquearse cada vez que cambia la escena de destino. Después de
+activar el desbloqueo correspondiente:
 
 - Arrastra dentro de un box para moverlo.
 - Arrastra un borde o una esquina para cambiar su tamaño; `Shift` permite redimensionar desde cualquier punto.
 - Usa `Cmd/Ctrl` + arrastrar, la rueda o los deslizadores para corregir el encuadre y el zoom del contenido.
 - Usa las flechas con pasos de 1 o 10 píxeles para realizar ajustes finos.
 - Haz doble clic para restablecer el encuadre y **Deshacer** para recuperar el estado anterior.
+- Elige **Rellenar**, **Ajustar completo**, **Estirar** o **Manual** para cada box. Manual admite zoom entre 10 % y
+  400 %, por lo que una imagen o escena también puede achicarse dentro del marco.
 
-Los cambios son visibles inmediatamente en la salida y quedan guardados en la colección de escenas de OBS.
+Preview aparece en azul y Program en rojo. Si una misma instancia del layout está simultáneamente en Preview y Program,
+la edición de Preview se bloquea porque OBS comparte sus ajustes y el cambio también sería visible al aire. Los cambios
+quedan guardados en la colección de escenas de OBS.
 
 ## Playlist por box
 
-Abre **Paneles → Box Layouts – Playlist**. El panel sigue la escena que está en Program y guarda una lista separada
-para cada box de cada instancia de **Layout de boxes**.
+Abre **Paneles → Box Layouts – Playlist**. En modo estudio, el selector superior permite trabajar en **Preview** para
+preparar material o en **Program** para cambiar cámaras y fuentes en vivo. Guarda una lista separada para cada box de
+cada instancia de **Layout de boxes**.
 
 1. Elige el box que quieras controlar.
 2. Selecciona una fuente o escena existente y pulsa **Agregar**. Puedes repetir una misma fuente y reordenar la cola.
-3. Selecciona un elemento y pulsa **PONER AL AIRE**, o haz doble clic sobre él.
+3. En Preview pulsa **CARGAR EN PREVIEW**. En Program pulsa **PONER AL AIRE** o haz doble clic sobre el elemento.
 4. Usa **Anterior** y **Siguiente** durante la emisión.
 5. Activa **Avanzar automáticamente** para pasar al siguiente elemento cuando termine un video. Para imágenes o
    escenas sin duración propia se usa el tiempo configurado en **Duración de imágenes/escenas**.
 6. Activa **Repetir la lista** si quieres volver al primer elemento después del último.
+7. Cada elemento recuerda su propio modo de encuadre, zoom y posición. Después de ajustarlo desde el panel de control,
+   pulsa **Guardar encuadre** en la playlist para recuperarlo cada vez que vuelvas a esa cámara, imagen, video o escena.
 
 La barra inferior muestra el progreso del video o la cuenta regresiva de una imagen. Al seleccionar un video, el
 plugin lo reinicia desde el comienzo. Si una fuente de video tiene su propio bucle activado, el salto al inicio también
@@ -178,8 +185,9 @@ La versión 0.7.0 registra acciones globales para los seis boxes. En **OBS → A
 - **Fuente anterior** y **Fuente siguiente**, que recorren su playlist de forma circular.
 - **Poner fuente 1–6**, que salta directamente a una de las primeras seis posiciones de la playlist.
 
-Los atajos solo modifican una instancia de **Layout de boxes** que forme parte de la escena actualmente en Program. Si
-hay varias instancias en Program, usan la que esté seleccionada en el panel Playlist. Un box sin lista o una posición
+Los atajos siempre modifican una instancia de **Layout de boxes** que forme parte de la escena actualmente en Program,
+independientemente de que el panel Playlist esté mostrando Preview. Si hay varias instancias en Program, usan la última
+que se haya seleccionado con el panel en modo Program. Un box sin lista o una posición
 que no exista se ignora de forma segura.
 
 Para Stream Deck, asigna primero combinaciones libres en los Atajos de OBS. Después añade una acción

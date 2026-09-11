@@ -42,11 +42,21 @@ constexpr int DEFAULT_STILL_DURATION_MS = 5000;
 constexpr int HOTKEY_DIRECT_ITEMS = 6;
 constexpr int HOTKEY_ACTION_PREVIOUS = -1;
 constexpr int HOTKEY_ACTION_NEXT = -2;
+constexpr int TARGET_PREVIEW = 0;
+constexpr int TARGET_PROGRAM = 1;
+constexpr int FIT_FILL = 0;
+constexpr int FIT_CONTAIN = 1;
+constexpr int FIT_STRETCH = 2;
+constexpr int FIT_MANUAL = 3;
 
 struct PlaylistItem {
 	QString source_uuid;
 	QString source_name;
 	int duration_ms = DEFAULT_STILL_DURATION_MS;
+	int fit_mode = FIT_FILL;
+	double zoom = 1.0;
+	double pan_x = 0.0;
+	double pan_y = 0.0;
 };
 
 struct PlaylistState {
@@ -59,6 +69,7 @@ struct PlaylistState {
 struct SourceChoice {
 	QString uuid;
 	QString name;
+	bool scene = false;
 };
 
 QString tr_text(const char *key)
@@ -78,9 +89,22 @@ QString format_time(int64_t milliseconds)
 			.arg(hours)
 			.arg(minutes, 2, 10, QLatin1Char('0'))
 			.arg(remainder, 2, 10, QLatin1Char('0'));
-	return QStringLiteral("%1:%2")
-		.arg(minutes, 2, 10, QLatin1Char('0'))
-		.arg(remainder, 2, 10, QLatin1Char('0'));
+	return QStringLiteral("%1:%2").arg(minutes, 2, 10, QLatin1Char('0')).arg(remainder, 2, 10, QLatin1Char('0'));
+}
+
+QString fit_mode_name(int fit_mode)
+{
+	switch (fit_mode) {
+	case FIT_CONTAIN:
+		return tr_text("Fit.Contain");
+	case FIT_STRETCH:
+		return tr_text("Fit.Stretch");
+	case FIT_MANUAL:
+		return tr_text("Fit.Manual");
+	case FIT_FILL:
+	default:
+		return tr_text("Fit.Fill");
+	}
 }
 
 int preset_box_count(int preset)
@@ -110,9 +134,9 @@ int layout_box_count(obs_source_t *layout)
 	obs_data_t *settings = obs_source_get_settings(layout);
 	const int preset = static_cast<int>(obs_data_get_int(settings, "preset"));
 	const int count = preset == PRESET_CUSTOM
-			  ? std::clamp<int>(static_cast<int>(obs_data_get_int(settings, "custom_box_count")), 1,
-					    MAX_BOXES)
-			  : preset_box_count(preset);
+				  ? std::clamp<int>(static_cast<int>(obs_data_get_int(settings, "custom_box_count")), 1,
+						    MAX_BOXES)
+				  : preset_box_count(preset);
 	obs_data_release(settings);
 	return count;
 }
@@ -140,8 +164,14 @@ PlaylistState load_playlist(obs_source_t *layout, int box)
 			PlaylistItem entry;
 			entry.source_uuid = QString::fromUtf8(obs_data_get_string(item, "source_uuid"));
 			entry.source_name = QString::fromUtf8(obs_data_get_string(item, "source_name"));
-			entry.duration_ms = std::clamp<int>(static_cast<int>(obs_data_get_int(item, "duration_ms")),
-							500, 3600000);
+			entry.duration_ms =
+				std::clamp<int>(static_cast<int>(obs_data_get_int(item, "duration_ms")), 500, 3600000);
+			entry.fit_mode = std::clamp<int>(static_cast<int>(obs_data_get_int(item, "fit_mode")), FIT_FILL,
+							 FIT_MANUAL);
+			entry.zoom = obs_data_has_user_value(item, "zoom") ? obs_data_get_double(item, "zoom") : 1.0;
+			entry.zoom = std::clamp(entry.zoom, 0.1, 4.0);
+			entry.pan_x = std::clamp(obs_data_get_double(item, "pan_x"), -100.0, 100.0);
+			entry.pan_y = std::clamp(obs_data_get_double(item, "pan_y"), -100.0, 100.0);
 			state.items.push_back(entry);
 			obs_data_release(item);
 		}
@@ -171,7 +201,7 @@ QString assigned_box_source(obs_source_t *layout, int box)
 	return name;
 }
 
-void save_playlist(obs_source_t *layout, int box, const PlaylistState &state, const QString &take_source = {})
+void save_playlist(obs_source_t *layout, int box, const PlaylistState &state, const PlaylistItem *take_item = nullptr)
 {
 	if (!layout || box < 0 || box >= MAX_BOXES)
 		return;
@@ -186,6 +216,10 @@ void save_playlist(obs_source_t *layout, int box, const PlaylistState &state, co
 		obs_data_set_string(item, "source_uuid", uuid.constData());
 		obs_data_set_string(item, "source_name", name.constData());
 		obs_data_set_int(item, "duration_ms", entry.duration_ms);
+		obs_data_set_int(item, "fit_mode", entry.fit_mode);
+		obs_data_set_double(item, "zoom", entry.zoom);
+		obs_data_set_double(item, "pan_x", entry.pan_x);
+		obs_data_set_double(item, "pan_y", entry.pan_y);
 		obs_data_array_push_back(items, item);
 		obs_data_release(item);
 	}
@@ -197,13 +231,40 @@ void save_playlist(obs_source_t *layout, int box, const PlaylistState &state, co
 	obs_data_set_bool(settings, key, state.auto_advance);
 	playlist_key(key, sizeof(key), box, "loop");
 	obs_data_set_bool(settings, key, state.loop);
-	if (!take_source.isNull()) {
+	if (take_item) {
 		snprintf(key, sizeof(key), "box_%d_source", box + 1);
-		const QByteArray name = take_source.toUtf8();
+		const QByteArray name = take_item->source_name.toUtf8();
 		obs_data_set_string(settings, key, name.constData());
+		snprintf(key, sizeof(key), "box_%d_fit_mode", box + 1);
+		obs_data_set_int(settings, key, take_item->fit_mode);
+		snprintf(key, sizeof(key), "box_%d_zoom", box + 1);
+		obs_data_set_double(settings, key, take_item->zoom);
+		snprintf(key, sizeof(key), "box_%d_pan_x", box + 1);
+		obs_data_set_double(settings, key, take_item->pan_x);
+		snprintf(key, sizeof(key), "box_%d_pan_y", box + 1);
+		obs_data_set_double(settings, key, take_item->pan_y);
 	}
 	obs_source_update(layout, settings);
 	obs_data_release(settings);
+}
+
+PlaylistItem current_box_framing(obs_source_t *layout, int box)
+{
+	PlaylistItem framing;
+	if (!layout || box < 0 || box >= MAX_BOXES)
+		return framing;
+	obs_data_t *settings = obs_source_get_settings(layout);
+	char key[64];
+	snprintf(key, sizeof(key), "box_%d_fit_mode", box + 1);
+	framing.fit_mode = std::clamp<int>(static_cast<int>(obs_data_get_int(settings, key)), FIT_FILL, FIT_MANUAL);
+	snprintf(key, sizeof(key), "box_%d_zoom", box + 1);
+	framing.zoom = std::clamp(obs_data_get_double(settings, key), 0.1, 4.0);
+	snprintf(key, sizeof(key), "box_%d_pan_x", box + 1);
+	framing.pan_x = std::clamp(obs_data_get_double(settings, key), -100.0, 100.0);
+	snprintf(key, sizeof(key), "box_%d_pan_y", box + 1);
+	framing.pan_y = std::clamp(obs_data_get_double(settings, key), -100.0, 100.0);
+	obs_data_release(settings);
+	return framing;
 }
 
 obs_source_t *resolve_item(const PlaylistItem &item)
@@ -257,7 +318,8 @@ bool add_source_choice(void *param, obs_source_t *source)
 	    !(obs_source_get_output_flags(source) & OBS_SOURCE_VIDEO))
 		return true;
 	scan->choices.push_back({QString::fromUtf8(obs_source_get_uuid(source)),
-				QString::fromUtf8(obs_source_get_name(source))});
+				 QString::fromUtf8(obs_source_get_name(source)),
+				 obs_source_get_type(source) == OBS_SOURCE_TYPE_SCENE});
 	return true;
 }
 
@@ -275,6 +337,9 @@ public:
 		heading.setBold(true);
 		program_label->setFont(heading);
 		root->addWidget(program_label);
+
+		target_selector = new QComboBox(this);
+		root->addWidget(target_selector);
 
 		layout_selector = new QComboBox(this);
 		root->addWidget(layout_selector);
@@ -301,9 +366,11 @@ public:
 
 		auto *edit_row = new QHBoxLayout;
 		remove_button = new QPushButton(tr_text("Playlist.Remove"), this);
+		save_framing_button = new QPushButton(tr_text("Playlist.SaveFraming"), this);
 		up_button = new QPushButton(QStringLiteral("↑"), this);
 		down_button = new QPushButton(QStringLiteral("↓"), this);
 		edit_row->addWidget(remove_button);
+		edit_row->addWidget(save_framing_button);
 		edit_row->addStretch(1);
 		edit_row->addWidget(up_button);
 		edit_row->addWidget(down_button);
@@ -347,9 +414,19 @@ public:
 		root->addWidget(progress);
 
 		connect(layout_selector, &QComboBox::currentIndexChanged, this, [this](int) {
+			if (!preview_target())
+				preferred_program_layout_uuid = layout_selector->currentData().toString();
 			reset_runtime();
 			playlist_signature.clear();
 			refresh_selected_layout();
+		});
+		connect(target_selector, &QComboBox::currentIndexChanged, this, [this](int) {
+			program_uuid.clear();
+			layout_signature.clear();
+			source_signature.clear();
+			playlist_signature.clear();
+			reset_runtime();
+			refresh();
 		});
 		connect(box_selector, &QComboBox::currentIndexChanged, this, [this](int) {
 			reset_runtime();
@@ -360,9 +437,11 @@ public:
 		connect(queue, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem *) { take_selected(); });
 		connect(add_button, &QPushButton::clicked, this, [this]() { add_item(); });
 		connect(source_picker, &QComboBox::currentIndexChanged, this, [this](int) {
-			add_button->setEnabled(box_selector->count() > 0 && !source_picker->currentData().toString().isEmpty());
+			add_button->setEnabled(box_selector->count() > 0 &&
+					       !source_picker->currentData().toString().isEmpty());
 		});
 		connect(remove_button, &QPushButton::clicked, this, [this]() { remove_item(); });
+		connect(save_framing_button, &QPushButton::clicked, this, [this]() { save_selected_framing(); });
 		connect(up_button, &QPushButton::clicked, this, [this]() { move_item(-1); });
 		connect(down_button, &QPushButton::clicked, this, [this]() { move_item(1); });
 		connect(take_button, &QPushButton::clicked, this, [this]() { take_selected(); });
@@ -417,6 +496,31 @@ public:
 	}
 
 private:
+	bool preview_target() const
+	{
+		return obs_frontend_preview_program_mode_active() &&
+		       target_selector->currentData().toInt() == TARGET_PREVIEW;
+	}
+
+	void refresh_target_choices()
+	{
+		const bool studio = obs_frontend_preview_program_mode_active();
+		if (studio == studio_mode_known && target_selector->count() > 0)
+			return;
+		const int previous = target_selector->count() > 0 ? target_selector->currentData().toInt()
+								  : TARGET_PREVIEW;
+		const QSignalBlocker blocker(target_selector);
+		target_selector->clear();
+		if (studio)
+			target_selector->addItem(tr_text("Target.Preview"), TARGET_PREVIEW);
+		target_selector->addItem(tr_text("Target.Program"), TARGET_PROGRAM);
+		const int retained = target_selector->findData(studio ? previous : TARGET_PROGRAM);
+		target_selector->setCurrentIndex(retained >= 0 ? retained : 0);
+		studio_mode_known = studio;
+		program_uuid.clear();
+		layout_signature.clear();
+	}
+
 	obs_source_t *selected_layout() const
 	{
 		const QByteArray uuid = layout_selector->currentData().toString().toUtf8();
@@ -435,7 +539,7 @@ private:
 		}
 		if (scan.layouts.empty())
 			return nullptr;
-		const QString preferred_uuid = layout_selector->currentData().toString();
+		const QString preferred_uuid = preferred_program_layout_uuid;
 		size_t selected_index = 0;
 		if (!preferred_uuid.isEmpty()) {
 			for (size_t i = 0; i < scan.layouts.size(); i++) {
@@ -454,8 +558,11 @@ private:
 
 	void refresh()
 	{
+		refresh_target_choices();
 		LayoutScan scan;
-		obs_source_t *program = obs_frontend_get_current_scene();
+		const bool preview = preview_target();
+		obs_source_t *program = preview ? obs_frontend_get_current_preview_scene()
+						: obs_frontend_get_current_scene();
 		QString next_program_uuid;
 		QString program_name;
 		if (program) {
@@ -479,16 +586,43 @@ private:
 			layout_selector->clear();
 			for (obs_source_t *layout : scan.layouts)
 				layout_selector->addItem(QString::fromUtf8(obs_source_get_name(layout)),
-						 QString::fromUtf8(obs_source_get_uuid(layout)));
+							 QString::fromUtf8(obs_source_get_uuid(layout)));
 			const int retained = layout_selector->findData(selected_uuid);
 			if (retained >= 0)
 				layout_selector->setCurrentIndex(retained);
+			if (!preview)
+				preferred_program_layout_uuid = layout_selector->currentData().toString();
 			layout_signature = signature;
 			refresh_selected_layout();
 		}
+		preview_shared = false;
+		if (preview) {
+			LayoutScan program_scan;
+			obs_source_t *on_air = obs_frontend_get_current_scene();
+			if (on_air) {
+				scan_layouts(on_air, program_scan);
+				obs_source_release(on_air);
+			}
+			const QString selected_uuid = layout_selector->currentData().toString();
+			for (obs_source_t *candidate : program_scan.layouts) {
+				if (selected_uuid == QString::fromUtf8(obs_source_get_uuid(candidate)))
+					preview_shared = true;
+				obs_source_release(candidate);
+			}
+		}
 
-		program_label->setText(scan.layouts.empty() ? tr_text("Playlist.NoLayout")
-							       : tr_text("Playlist.ProgramScene").arg(program_name));
+		program_label->setText(scan.layouts.empty()
+					       ? tr_text(preview ? "Playlist.NoPreviewLayout" : "Playlist.NoLayout")
+					       : tr_text(preview ? "Playlist.PreviewScene" : "Playlist.ProgramScene")
+							 .arg(program_name));
+		warning->setText(tr_text(preview_shared
+						 ? "Playlist.SharedWarning"
+						 : (preview ? "Playlist.PreviewWarning" : "Playlist.LiveWarning")));
+		warning->setStyleSheet(
+			preview_shared ? QStringLiteral("background:#a86616;color:white;padding:5px;font-weight:bold;")
+			: preview      ? QStringLiteral("background:#176a91;color:white;padding:5px;font-weight:bold;")
+				  : QStringLiteral("background:#9f2530;color:white;padding:5px;font-weight:bold;"));
+		take_button->setText(tr_text(preview ? "Playlist.LoadPreview" : "Playlist.Take"));
 		layout_selector->setVisible(scan.layouts.size() > 1);
 		for (obs_source_t *layout : scan.layouts)
 			obs_source_release(layout);
@@ -522,20 +656,27 @@ private:
 		obs_source_t *layout = selected_layout();
 		ChoiceScan scan;
 		scan.layout = layout;
+		obs_enum_scenes(add_source_choice, &scan);
 		obs_enum_sources(add_source_choice, &scan);
 		std::sort(scan.choices.begin(), scan.choices.end(), [](const SourceChoice &a, const SourceChoice &b) {
+			if (a.scene != b.scene)
+				return a.scene;
 			return QString::localeAwareCompare(a.name, b.name) < 0;
 		});
 		QString signature;
 		for (const SourceChoice &choice : scan.choices)
-			signature += choice.uuid + QLatin1Char('|') + choice.name + QLatin1Char('\n');
+			signature += choice.uuid + QLatin1Char('|') + choice.name + QLatin1Char('|') +
+				     QString::number(choice.scene ? 1 : 0) + QLatin1Char('\n');
 		if (signature != source_signature) {
 			const QString selected_uuid = source_picker->currentData().toString();
 			const QSignalBlocker blocker(source_picker);
 			source_picker->clear();
 			source_picker->addItem(tr_text("Playlist.ChooseSource"), QString());
 			for (const SourceChoice &choice : scan.choices)
-				source_picker->addItem(choice.name, choice.uuid);
+				source_picker->addItem(tr_text(choice.scene ? "Playlist.SceneChoice"
+									    : "Playlist.SourceChoice")
+							       .arg(choice.name),
+						       choice.uuid);
 			const int retained = source_picker->findData(selected_uuid);
 			source_picker->setCurrentIndex(retained >= 0 ? retained : 0);
 			source_signature = signature;
@@ -552,7 +693,10 @@ private:
 					    .arg(state.loop ? 1 : 0);
 		for (const PlaylistItem &item : state.items)
 			signature += item.source_uuid + QLatin1Char('|') + item.source_name + QLatin1Char('|') +
-				     QString::number(item.duration_ms) + QLatin1Char('\n');
+				     QString::number(item.duration_ms) + QLatin1Char('|') +
+				     QString::number(item.fit_mode) + QLatin1Char('|') + QString::number(item.zoom) +
+				     QLatin1Char('|') + QString::number(item.pan_x) + QLatin1Char('|') +
+				     QString::number(item.pan_y) + QLatin1Char('\n');
 		return signature;
 	}
 
@@ -578,11 +722,16 @@ private:
 			for (int i = 0; i < static_cast<int>(state.items.size()); i++) {
 				const PlaylistItem &entry = state.items[static_cast<size_t>(i)];
 				obs_source_t *source = resolve_item(entry);
-				const QString actual_name = source ? QString::fromUtf8(obs_source_get_name(source)) : entry.source_name;
-				const QString prefix = i == state.current ? QStringLiteral("▶  ") : QStringLiteral("    ");
-				auto *row = new QListWidgetItem(prefix + actual_name, queue);
+				const QString actual_name = source ? QString::fromUtf8(obs_source_get_name(source))
+								   : entry.source_name;
+				const QString prefix = i == state.current ? QStringLiteral("▶  ")
+									  : QStringLiteral("    ");
+				auto *row = new QListWidgetItem(prefix + actual_name + QStringLiteral("  ·  ") +
+									fit_mode_name(entry.fit_mode),
+								queue);
 				if (!source) {
-					row->setText(prefix + QStringLiteral("⚠ ") + actual_name);
+					row->setText(prefix + QStringLiteral("⚠ ") + actual_name +
+						     QStringLiteral("  ·  ") + fit_mode_name(entry.fit_mode));
 					row->setForeground(QColor(230, 120, 80));
 				}
 				if (source)
@@ -623,11 +772,12 @@ private:
 		const int row = queue->currentRow();
 		const bool selected = row >= 0 && row < static_cast<int>(state.items.size());
 		remove_button->setEnabled(selected);
+		save_framing_button->setEnabled(selected);
 		up_button->setEnabled(selected && row > 0);
 		down_button->setEnabled(selected && row + 1 < static_cast<int>(state.items.size()));
-		take_button->setEnabled(selected);
-		previous_button->setEnabled(!state.items.empty());
-		next_button->setEnabled(!state.items.empty());
+		take_button->setEnabled(selected && !preview_shared);
+		previous_button->setEnabled(!state.items.empty() && !preview_shared);
+		next_button->setEnabled(!state.items.empty() && !preview_shared);
 		duration->setEnabled(selected);
 		if (selected) {
 			updating_ui = true;
@@ -647,12 +797,41 @@ private:
 			return;
 		}
 		PlaylistState state = load_playlist(layout, selected_box());
-		state.items.push_back({uuid, source_picker->currentText(), duration->value() * 1000});
+		PlaylistItem item = current_box_framing(layout, selected_box());
+		item.source_uuid = uuid;
+		obs_source_t *source = obs_get_source_by_uuid(uuid.toUtf8().constData());
+		item.source_name = source ? QString::fromUtf8(obs_source_get_name(source))
+					  : source_picker->currentText();
+		if (source)
+			obs_source_release(source);
+		item.duration_ms = duration->value() * 1000;
+		state.items.push_back(item);
 		save_playlist(layout, selected_box(), state);
 		obs_source_release(layout);
 		playlist_signature.clear();
 		refresh_playlist();
 		queue->setCurrentRow(static_cast<int>(state.items.size()) - 1);
+	}
+
+	void save_selected_framing()
+	{
+		obs_source_t *layout = selected_layout();
+		if (!layout)
+			return;
+		PlaylistState state = load_playlist(layout, selected_box());
+		const int row = queue->currentRow();
+		if (row >= 0 && row < static_cast<int>(state.items.size())) {
+			const PlaylistItem framing = current_box_framing(layout, selected_box());
+			PlaylistItem &item = state.items[static_cast<size_t>(row)];
+			item.fit_mode = framing.fit_mode;
+			item.zoom = framing.zoom;
+			item.pan_x = framing.pan_x;
+			item.pan_y = framing.pan_y;
+			save_playlist(layout, selected_box(), state);
+		}
+		obs_source_release(layout);
+		playlist_signature.clear();
+		refresh_playlist();
 	}
 
 	void remove_item()
@@ -766,6 +945,8 @@ private:
 
 	void take_index(int index, bool automatic)
 	{
+		if (preview_shared)
+			return;
 		obs_source_t *layout = selected_layout();
 		if (!layout)
 			return;
@@ -791,7 +972,7 @@ private:
 		item.source_uuid = QString::fromUtf8(obs_source_get_uuid(source));
 		item.source_name = QString::fromUtf8(obs_source_get_name(source));
 		state.current = index;
-		save_playlist(layout, box, state, item.source_name);
+		save_playlist(layout, box, state, &item);
 		if (obs_source_get_output_flags(source) & OBS_SOURCE_CONTROLLABLE_MEDIA)
 			obs_source_media_restart(source);
 		blog(LOG_INFO, "[obs-box-layouts] playlist %s take layout='%s' box=%d item=%d source='%s'",
@@ -871,26 +1052,29 @@ private:
 			const enum obs_media_state media_state = obs_source_media_get_state(source);
 			const int64_t total = std::max<int64_t>(obs_source_media_get_duration(source), 0);
 			const int64_t current = std::clamp<int64_t>(obs_source_media_get_time(source), 0,
-							 total > 0 ? total : INT64_MAX);
+								    total > 0 ? total : INT64_MAX);
 			const int64_t remaining = total > 0 ? std::max<int64_t>(total - current, 0) : 0;
 			status->setText(total > 0 ? tr_text("Playlist.MediaStatus")
-							.arg(item.source_name, format_time(current), format_time(total),
-							     format_time(remaining))
-						 : tr_text("Playlist.MediaUnknown").arg(item.source_name));
+							    .arg(item.source_name, format_time(current),
+								 format_time(total), format_time(remaining))
+						  : tr_text("Playlist.MediaUnknown").arg(item.source_name));
 			progress->setValue(total > 0 ? static_cast<int>(current * 1000 / total) : 0);
-			const int64_t loop_window = total > 0 ? std::min<int64_t>(2000, std::max<int64_t>(total / 4, 250)) : 0;
+			const int64_t loop_window =
+				total > 0 ? std::min<int64_t>(2000, std::max<int64_t>(total / 4, 250)) : 0;
 			const bool loop_wrapped = media_state == OBS_MEDIA_STATE_PLAYING &&
-				previous_state == OBS_MEDIA_STATE_PLAYING && total > 0 && previous_time >= total - loop_window &&
-				current <= loop_window;
+						  previous_state == OBS_MEDIA_STATE_PLAYING && total > 0 &&
+						  previous_time >= total - loop_window && current <= loop_window;
 			const bool ended_state = media_state == OBS_MEDIA_STATE_ENDED &&
-				(previous_state == OBS_MEDIA_STATE_PLAYING || previous_state == OBS_MEDIA_STATE_BUFFERING);
+						 (previous_state == OBS_MEDIA_STATE_PLAYING ||
+						  previous_state == OBS_MEDIA_STATE_BUFFERING);
 			ended_now = now >= grace_until && (loop_wrapped || ended_state);
 			previous_state = media_state;
 			previous_time = current;
 		} else {
 			const int64_t total = std::max(item.duration_ms, 500);
 			if (!state.auto_advance) {
-				status->setText(tr_text("Playlist.StillReady").arg(item.source_name, format_time(total)));
+				status->setText(
+					tr_text("Playlist.StillReady").arg(item.source_name, format_time(total)));
 				progress->setValue(0);
 				obs_source_release(source);
 				obs_source_release(layout);
@@ -898,8 +1082,7 @@ private:
 			}
 			const int64_t elapsed = std::clamp<int64_t>(now - runtime_started, 0, total);
 			const int64_t remaining = std::max<int64_t>(total - elapsed, 0);
-			status->setText(tr_text("Playlist.StillStatus")
-						.arg(item.source_name, format_time(remaining)));
+			status->setText(tr_text("Playlist.StillStatus").arg(item.source_name, format_time(remaining)));
 			progress->setValue(static_cast<int>(elapsed * 1000 / total));
 			ended_now = state.auto_advance && now >= grace_until && elapsed >= total;
 		}
@@ -918,7 +1101,8 @@ private:
 				target = 0;
 			else {
 				if (state.current >= 0 && state.current < static_cast<int>(state.items.size())) {
-					obs_source_t *source = resolve_item(state.items[static_cast<size_t>(state.current)]);
+					obs_source_t *source =
+						resolve_item(state.items[static_cast<size_t>(state.current)]);
 					if (source) {
 						if (obs_source_get_output_flags(source) & OBS_SOURCE_CONTROLLABLE_MEDIA)
 							obs_source_media_stop(source);
@@ -946,6 +1130,7 @@ private:
 	}
 
 	QLabel *program_label = nullptr;
+	QComboBox *target_selector = nullptr;
 	QComboBox *layout_selector = nullptr;
 	QComboBox *box_selector = nullptr;
 	QLabel *warning = nullptr;
@@ -953,6 +1138,7 @@ private:
 	QPushButton *add_button = nullptr;
 	QListWidget *queue = nullptr;
 	QPushButton *remove_button = nullptr;
+	QPushButton *save_framing_button = nullptr;
 	QPushButton *up_button = nullptr;
 	QPushButton *down_button = nullptr;
 	QSpinBox *duration = nullptr;
@@ -965,10 +1151,13 @@ private:
 	QProgressBar *progress = nullptr;
 	QTimer *timer = nullptr;
 	QString program_uuid;
+	QString preferred_program_layout_uuid;
 	QString layout_signature;
 	QString source_signature;
 	QString playlist_signature;
 	bool updating_ui = false;
+	bool studio_mode_known = false;
+	bool preview_shared = false;
 
 	QString runtime_key;
 	qint64 runtime_started = 0;
@@ -998,10 +1187,13 @@ void playlist_hotkey_callback(void *data, obs_hotkey_id, obs_hotkey_t *, bool pr
 	const auto *hotkey = static_cast<HotkeyAction *>(data);
 	const int box = hotkey->box;
 	const int action = hotkey->action;
-	QMetaObject::invokeMethod(playlist, [box, action]() {
-		if (playlist)
-			playlist->trigger_hotkey(box, action);
-	}, Qt::QueuedConnection);
+	QMetaObject::invokeMethod(
+		playlist,
+		[box, action]() {
+			if (playlist)
+				playlist->trigger_hotkey(box, action);
+		},
+		Qt::QueuedConnection);
 }
 
 void playlist_hotkeys_save(obs_data_t *save_data, bool saving, void *)
@@ -1052,8 +1244,8 @@ void register_playlist_hotkeys()
 			snprintf(name, sizeof(name), "obs_box_layouts_box_%d_take_%d", box + 1, action + 1);
 		hotkey.name = name;
 		const QByteArray text = description.toUtf8();
-		hotkey.id = obs_hotkey_register_frontend(hotkey.name.c_str(), text.constData(), playlist_hotkey_callback,
-						  &hotkey);
+		hotkey.id = obs_hotkey_register_frontend(hotkey.name.c_str(), text.constData(),
+							 playlist_hotkey_callback, &hotkey);
 	};
 
 	for (int box = 0; box < MAX_BOXES; box++) {

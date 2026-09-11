@@ -41,6 +41,13 @@ enum resize_edges {
 	RESIZE_BOTTOM = 1 << 3,
 };
 
+enum content_fit_mode {
+	FIT_FILL = 0,
+	FIT_CONTAIN,
+	FIT_STRETCH,
+	FIT_MANUAL,
+};
+
 struct box_rect {
 	float x;
 	float y;
@@ -55,6 +62,7 @@ struct layout_box {
 	float zoom;
 	float pan_x;
 	float pan_y;
+	int fit_mode;
 	float radius;
 	float border_width;
 	uint32_t border_color;
@@ -109,6 +117,7 @@ struct box_render_state {
 	float zoom;
 	float pan_x;
 	float pan_y;
+	int fit_mode;
 	float radius;
 	float border_width;
 	uint32_t border_color;
@@ -313,6 +322,8 @@ static void box_layout_update(void *data, obs_data_t *settings)
 		layout->boxes[i].pan_x = (float)obs_data_get_double(settings, key) / 100.0f;
 		box_key(key, sizeof(key), i, "pan_y");
 		layout->boxes[i].pan_y = (float)obs_data_get_double(settings, key) / 100.0f;
+		box_key(key, sizeof(key), i, "fit_mode");
+		layout->boxes[i].fit_mode = (int)obs_data_get_int(settings, key);
 		box_key(key, sizeof(key), i, "radius");
 		layout->boxes[i].radius = (float)obs_data_get_double(settings, key);
 		box_key(key, sizeof(key), i, "border_width");
@@ -386,6 +397,8 @@ static void box_layout_defaults(obs_data_t *settings)
 		obs_data_set_default_double(settings, key, 0.0);
 		box_key(key, sizeof(key), i, "pan_y");
 		obs_data_set_default_double(settings, key, 0.0);
+		box_key(key, sizeof(key), i, "fit_mode");
+		obs_data_set_default_int(settings, key, FIT_FILL);
 		box_key(key, sizeof(key), i, "radius");
 		obs_data_set_default_double(settings, key, 24.0);
 		box_key(key, sizeof(key), i, "border_width");
@@ -518,7 +531,7 @@ static void calculate_cover_uv(uint32_t source_width, uint32_t source_height, fl
 	else
 		scale->y = source_aspect / box_aspect;
 
-	zoom = fmaxf(zoom, 0.01f);
+	zoom = fmaxf(zoom, 1.0f);
 	scale->x = fminf(scale->x / zoom, 1.0f);
 	scale->y = fminf(scale->y / zoom, 1.0f);
 	offset->x = (1.0f - scale->x) * (0.5f + 0.5f * fmaxf(-1.0f, fminf(1.0f, pan_x)));
@@ -640,32 +653,83 @@ static void draw_rounded_border(const struct box_rect *rect, float radius, float
 	}
 }
 
-static void draw_native_masked_texture(gs_texture_t *texture, uint32_t source_width, uint32_t source_height,
-				       const struct box_rect *rect, float zoom, float pan_x, float pan_y, float radius,
-				       float border_width, uint32_t border_color)
+static bool intersect_rects(const struct box_rect *first, const struct box_rect *second, struct box_rect *result)
 {
-	if (texture) {
+	const float left = fmaxf(first->x, second->x);
+	const float top = fmaxf(first->y, second->y);
+	const float right = fminf(first->x + first->width, second->x + second->width);
+	const float bottom = fminf(first->y + first->height, second->y + second->height);
+	if (right <= left || bottom <= top)
+		return false;
+	set_rect(result, left, top, right - left, bottom - top);
+	return true;
+}
+
+static void calculate_contained_rect(uint32_t source_width, uint32_t source_height, const struct box_rect *box,
+				     float zoom, float pan_x, float pan_y, struct box_rect *destination)
+{
+	const float scale = fminf(box->width / (float)source_width, box->height / (float)source_height);
+	zoom = fminf(fmaxf(zoom, 0.1f), 4.0f);
+	destination->width = (float)source_width * scale * zoom;
+	destination->height = (float)source_height * scale * zoom;
+	const float travel_x = fabsf(box->width - destination->width) * 0.5f;
+	const float travel_y = fabsf(box->height - destination->height) * 0.5f;
+	pan_x = fmaxf(-1.0f, fminf(1.0f, pan_x));
+	pan_y = fmaxf(-1.0f, fminf(1.0f, pan_y));
+	destination->x = box->x + (box->width - destination->width) * 0.5f - pan_x * travel_x;
+	destination->y = box->y + (box->height - destination->height) * 0.5f - pan_y * travel_y;
+}
+
+static void draw_native_masked_texture(gs_texture_t *texture, uint32_t source_width, uint32_t source_height,
+				       const struct box_rect *rect, int fit_mode, float zoom, float pan_x, float pan_y,
+				       float radius, float border_width, uint32_t border_color)
+{
+	if (texture && source_width && source_height) {
 		struct vec2 uv_scale;
 		struct vec2 uv_offset;
-		calculate_cover_uv(source_width, source_height, rect->width, rect->height, zoom, pan_x, pan_y,
-				   &uv_scale, &uv_offset);
-		draw_rounded_texture(texture, rect, radius, &uv_scale, &uv_offset);
+		if (fit_mode == FIT_FILL) {
+			calculate_cover_uv(source_width, source_height, rect->width, rect->height, zoom, pan_x, pan_y,
+					   &uv_scale, &uv_offset);
+			draw_rounded_texture(texture, rect, radius, &uv_scale, &uv_offset);
+		} else if (fit_mode == FIT_STRETCH) {
+			vec2_set(&uv_scale, 1.0f, 1.0f);
+			vec2_zero(&uv_offset);
+			draw_rounded_texture(texture, rect, radius, &uv_scale, &uv_offset);
+		} else {
+			struct box_rect destination;
+			struct box_rect visible;
+			const bool manual = fit_mode == FIT_MANUAL;
+			calculate_contained_rect(source_width, source_height, rect, manual ? zoom : 1.0f,
+						 manual ? pan_x : 0.0f, manual ? pan_y : 0.0f, &destination);
+			if (intersect_rects(&destination, rect, &visible)) {
+				vec2_set(&uv_scale, visible.width / destination.width,
+					 visible.height / destination.height);
+				vec2_set(&uv_offset, (visible.x - destination.x) / destination.width,
+					 (visible.y - destination.y) / destination.height);
+				const bool fills_box = fabsf(visible.x - rect->x) < 0.5f &&
+						       fabsf(visible.y - rect->y) < 0.5f &&
+						       fabsf(visible.width - rect->width) < 0.5f &&
+						       fabsf(visible.height - rect->height) < 0.5f;
+				draw_rounded_texture(texture, &visible, fills_box ? radius : 0.0f, &uv_scale,
+						     &uv_offset);
+			}
+		}
 	}
 	draw_rounded_border(rect, radius, border_width, border_color);
 	gs_load_texture(NULL, 0);
 }
 
 static void draw_masked_texture(struct box_layout *layout, gs_texture_t *texture, uint32_t source_width,
-				uint32_t source_height, const struct box_rect *rect, float zoom, float pan_x,
-				float pan_y, float radius, float border_width, uint32_t border_color)
+				uint32_t source_height, const struct box_rect *rect, int fit_mode, float zoom,
+				float pan_x, float pan_y, float radius, float border_width, uint32_t border_color)
 {
-	if (!layout->effect_ready) {
+	if (!layout->effect_ready || fit_mode != FIT_FILL) {
 		if (!layout->graphics_warning_logged) {
 			blog(LOG_WARNING, "[obs-box-layouts] using native rounded-box renderer");
 			layout->graphics_warning_logged = true;
 		}
-		draw_native_masked_texture(texture, source_width, source_height, rect, zoom, pan_x, pan_y, radius,
-					   border_width, border_color);
+		draw_native_masked_texture(texture, source_width, source_height, rect, fit_mode, zoom, pan_x, pan_y,
+					   radius, border_width, border_color);
 		return;
 	}
 
@@ -758,6 +822,7 @@ static void box_layout_render(void *data, gs_effect_t *unused)
 		boxes[i].zoom = box->zoom;
 		boxes[i].pan_x = box->pan_x;
 		boxes[i].pan_y = box->pan_y;
+		boxes[i].fit_mode = box->fit_mode;
 		boxes[i].radius = box->radius;
 		boxes[i].border_width = box->border_width;
 		boxes[i].border_color = box->border_color;
@@ -771,8 +836,8 @@ static void box_layout_render(void *data, gs_effect_t *unused)
 		if (texture) {
 			struct box_rect canvas = {0.0f, 0.0f, (float)width, (float)height};
 			draw_masked_texture(layout, texture, obs_source_get_width(background),
-					    obs_source_get_height(background), &canvas, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f,
-					    0);
+					    obs_source_get_height(background), &canvas, FIT_FILL, 1.0f, 0.0f, 0.0f,
+					    0.0f, 0.0f, 0);
 		}
 		obs_source_release(background);
 	}
@@ -783,8 +848,8 @@ static void box_layout_render(void *data, gs_effect_t *unused)
 		gs_texture_t *texture = render_child(layout, box->source);
 		const uint32_t source_width = box->source ? obs_source_get_width(box->source) : 0;
 		const uint32_t source_height = box->source ? obs_source_get_height(box->source) : 0;
-		draw_masked_texture(layout, texture, source_width, source_height, &rects[i], box->zoom, box->pan_x,
-				    box->pan_y, box->radius, box->border_width, box->border_color);
+		draw_masked_texture(layout, texture, source_width, source_height, &rects[i], box->fit_mode, box->zoom,
+				    box->pan_x, box->pan_y, box->radius, box->border_width, box->border_color);
 		if (box->source)
 			obs_source_release(box->source);
 	}
@@ -1082,9 +1147,11 @@ static void box_layout_mouse_wheel(void *data, const struct obs_mouse_event *eve
 	uint32_t edges;
 	struct box_rect rect;
 	const int index = hit_test_box(layout, event->x, event->y, &edges, &rect);
-	if (index >= 0)
+	if (index >= 0) {
+		const float minimum_zoom = layout->boxes[index].fit_mode == FIT_MANUAL ? 0.1f : 1.0f;
 		layout->boxes[index].zoom =
-			fmaxf(1.0f, fminf(4.0f, layout->boxes[index].zoom + (y_delta > 0 ? 0.1f : -0.1f)));
+			fmaxf(minimum_zoom, fminf(4.0f, layout->boxes[index].zoom + (y_delta > 0 ? 0.1f : -0.1f)));
+	}
 	pthread_mutex_unlock(&layout->mutex);
 	if (index >= 0) {
 		blog(LOG_INFO, "[obs-box-layouts] editor wheel box=%d delta=%d", index + 1, y_delta);
@@ -1212,7 +1279,14 @@ static bool add_source_to_list(void *data, obs_source_t *source)
 	struct source_list_context *context = data;
 	if (source == context->self || !(obs_source_get_output_flags(source) & OBS_SOURCE_VIDEO))
 		return true;
-	obs_property_list_add_string(context->property, obs_source_get_name(source), obs_source_get_name(source));
+	const char *name = obs_source_get_name(source);
+	if (obs_source_get_type(source) == OBS_SOURCE_TYPE_SCENE) {
+		char display_name[512];
+		snprintf(display_name, sizeof(display_name), "%s %s", obs_module_text("Source.ScenePrefix"), name);
+		obs_property_list_add_string(context->property, display_name, name);
+	} else {
+		obs_property_list_add_string(context->property, name, name);
+	}
 	return true;
 }
 
@@ -1220,6 +1294,7 @@ static void populate_source_list(obs_property_t *property, obs_source_t *self)
 {
 	struct source_list_context context = {property, self};
 	obs_property_list_add_string(property, obs_module_text("None"), "");
+	obs_enum_scenes(add_source_to_list, &context);
 	obs_enum_sources(add_source_to_list, &context);
 }
 
@@ -1308,8 +1383,15 @@ static obs_properties_t *box_layout_properties(void *data)
 		obs_property_t *source = obs_properties_add_list(group, key, obs_module_text("Box.Source"),
 								 OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
 		populate_source_list(source, layout ? layout->context : NULL);
+		box_key(key, sizeof(key), i, "fit_mode");
+		obs_property_t *fit_mode = obs_properties_add_list(group, key, obs_module_text("Box.FitMode"),
+								   OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+		obs_property_list_add_int(fit_mode, obs_module_text("Fit.Fill"), FIT_FILL);
+		obs_property_list_add_int(fit_mode, obs_module_text("Fit.Contain"), FIT_CONTAIN);
+		obs_property_list_add_int(fit_mode, obs_module_text("Fit.Stretch"), FIT_STRETCH);
+		obs_property_list_add_int(fit_mode, obs_module_text("Fit.Manual"), FIT_MANUAL);
 		box_key(key, sizeof(key), i, "zoom");
-		obs_properties_add_float_slider(group, key, obs_module_text("Box.Zoom"), 1.0, 4.0, 0.01);
+		obs_properties_add_float_slider(group, key, obs_module_text("Box.Zoom"), 0.1, 4.0, 0.01);
 		box_key(key, sizeof(key), i, "pan_x");
 		obs_properties_add_float_slider(group, key, obs_module_text("Box.PanX"), -100.0, 100.0, 1.0);
 		box_key(key, sizeof(key), i, "pan_y");
